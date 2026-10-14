@@ -26,6 +26,10 @@ impl Env {
     }
 
     fn skl(&self, args: &[&str]) -> Output {
+        self.skl_with_env(args, &[])
+    }
+
+    fn skl_with_env(&self, args: &[&str], vars: &[(&str, &std::ffi::OsStr)]) -> Output {
         let out = Command::new(env!("CARGO_BIN_EXE_skl"))
             .args(args)
             .current_dir(&self.home)
@@ -36,6 +40,7 @@ impl Env {
             .env_remove("SKL_DATA_DIR")
             .env_remove("SKL_PROFILE")
             .env("GIT_CONFIG_NOSYSTEM", "1")
+            .envs(vars.iter().copied())
             .output()
             .unwrap();
         eprintln!(
@@ -571,7 +576,11 @@ fn concurrent_runs_take_turns() {
         .map(|_| {
             Command::new(env!("CARGO_BIN_EXE_skl"))
                 .arg("sync")
+                .current_dir(&env.home)
                 .env("HOME", &env.home)
+                .env_remove("SKL_CONFIG_DIR")
+                .env_remove("SKL_DATA_DIR")
+                .env_remove("SKL_PROFILE")
                 .env_remove("XDG_CONFIG_HOME")
                 .env_remove("XDG_DATA_HOME")
                 .stdout(std::process::Stdio::null())
@@ -797,4 +806,87 @@ fn list_shows_unmanaged_skills() {
         "skl's own links aren't listed"
     );
     assert!(!unmanaged.contains(".DS_Store"));
+}
+
+#[test]
+fn xdg_directories_and_skl_overrides() {
+    for use_override in [false, true] {
+        let env = Env::new();
+        let source = env.repo("skills", &[("notes", "notes")]);
+        let xdg_config = env.home.join("xdg config");
+        let xdg_data = env.home.join("xdg data");
+        let own_config = env.home.join("own config");
+        let own_data = env.home.join("own data");
+        let config = if use_override {
+            own_config.clone()
+        } else {
+            xdg_config.join("skl")
+        };
+        let data = if use_override {
+            own_data.clone()
+        } else {
+            xdg_data.join("skl")
+        };
+        fs::create_dir_all(&config).unwrap();
+        fs::write(
+            config.join("skills.toml"),
+            format!("[skills.notes]\nsource = {source:?}\nsubdir = \"notes\"\n"),
+        )
+        .unwrap();
+        let mut vars = vec![
+            ("XDG_CONFIG_HOME", xdg_config.as_os_str()),
+            ("XDG_DATA_HOME", xdg_data.as_os_str()),
+            ("SKL_CONFIG_DIR", std::ffi::OsStr::new("")),
+            ("SKL_DATA_DIR", std::ffi::OsStr::new("")),
+        ];
+        if use_override {
+            vars[2].1 = own_config.as_os_str();
+            vars[3].1 = own_data.as_os_str();
+        }
+        let dry = env.skl_with_env(&["sync", "--dry-run"], &vars);
+        assert!(dry.status.success(), "{dry:?}");
+        assert!(!data.join("state.toml").exists());
+        assert!(!data.join("store").exists());
+        assert!(!env.codex("notes").exists());
+        assert!(!config.join("skills.lock").exists());
+        let out = env.skl_with_env(&["sync"], &vars);
+        assert!(out.status.success(), "{out:?}");
+        assert!(config.join("skills.lock").is_file());
+        assert!(data.join("state.toml").is_file());
+        assert!(data.join("repos").is_dir());
+        let target = fs::read_link(env.codex("notes")).unwrap();
+        assert!(target.starts_with(data.join("store")));
+        assert!(target.join("SKILL.md").is_file());
+        assert!(!env.home.join(".config/skl").exists());
+        assert!(!env.home.join(".local/share/skl").exists());
+        if use_override {
+            assert!(!xdg_config.exists());
+            assert!(!xdg_data.exists());
+        }
+        let locked = env.skl_with_env(&["sync", "--locked"], &vars);
+        assert!(locked.status.success(), "{locked:?}");
+    }
+}
+
+#[test]
+fn empty_and_relative_xdg_directories_use_defaults() {
+    for value in ["", "relative", "~/not-expanded"] {
+        let env = Env::new();
+        write_skill(&env.home.join("local"), "notes", "local");
+        env.write_manifest("[skills.notes]\npath = \"~/local\"\n");
+        let out = env.skl_with_env(
+            &["sync"],
+            &[
+                ("XDG_CONFIG_HOME", std::ffi::OsStr::new(value)),
+                ("XDG_DATA_HOME", std::ffi::OsStr::new(value)),
+                ("SKL_CONFIG_DIR", std::ffi::OsStr::new("")),
+                ("SKL_DATA_DIR", std::ffi::OsStr::new("")),
+            ],
+        );
+        assert!(out.status.success(), "{out:?}");
+        assert!(env.home.join(".local/share/skl/state.toml").is_file());
+        assert!(env.codex("notes").join("SKILL.md").is_file());
+        assert!(!env.home.join("relative").exists());
+        assert!(!env.home.join("~").exists());
+    }
 }

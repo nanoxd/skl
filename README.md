@@ -22,7 +22,7 @@ deletes anything it didn't create.
 cargo install --git https://github.com/nanoxd/skl
 ```
 
-Prebuilt binaries for macOS (Apple Silicon and Intel) and Linux are attached to each
+Prebuilt binaries for macOS (Apple Silicon and Intel) and Linux (x86_64 and ARM64, glibc) are attached to each
 [release](https://github.com/nanoxd/skl/releases). `skl` needs `git` and `tar` on
 your `PATH`.
 
@@ -282,7 +282,11 @@ nothing uses any more are deleted after each sync.
 | `XDG_DATA_HOME`   | Data directory becomes `$XDG_DATA_HOME/skl`     |
 | `SKL_PROFILE`     | Active profiles, comma-separated                |
 
-The `SKL_` directory variables take precedence over the `XDG_` ones.
+The `SKL_` directory variables take precedence over the `XDG_` ones. Empty values
+are treated as unset. XDG directory values must be absolute; relative values are
+ignored and the defaults above are used. These rules apply on both Linux and macOS.
+Agent skill directories remain at the locations documented above; use a custom
+`agents` path to change them.
 
 ## Dotfiles integration
 
