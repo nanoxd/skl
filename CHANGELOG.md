@@ -4,6 +4,15 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Linux ARM64 (glibc) release binaries and CI coverage.
+
+### Fixed
+
+- Ignore relative `XDG_CONFIG_HOME` and `XDG_DATA_HOME` values and fall back to
+  the default directories, as required by the XDG Base Directory Specification.
+
 ## [0.1.0] - 2026-10-14
 
 Initial release.
