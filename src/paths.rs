@@ -99,5 +99,10 @@ fn dir_from_env(own: &str, xdg: &str) -> Option<PathBuf> {
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
     };
-    non_empty(own).or_else(|| non_empty(xdg).map(|d| d.join("skl")))
+    non_empty(own).or_else(|| {
+        // XDG base directories must be absolute; invalid values use the default.
+        non_empty(xdg)
+            .filter(|path| path.is_absolute())
+            .map(|dir| dir.join("skl"))
+    })
 }
