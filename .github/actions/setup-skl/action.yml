@@ -1,0 +1,59 @@
+name: Set up skl
+description: Install a version-pinned skl release with checksum verification on macOS or Linux
+inputs:
+  version:
+    description: Exact release tag to install (for example v0.1.0)
+    required: true
+outputs:
+  path:
+    description: Directory containing the installed skl executable
+    value: ${{ steps.install.outputs.path }}
+runs:
+  using: composite
+  steps:
+    - name: Download and verify skl
+      id: install
+      shell: bash
+      env:
+        SKL_SETUP_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        if [[ ! "$SKL_SETUP_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+          echo '::error::version must be an exact release tag, such as v0.1.0'
+          exit 1
+        fi
+        case "$(uname -s)/$(uname -m)" in
+          Darwin/arm64) target=aarch64-apple-darwin ;;
+          Darwin/x86_64) target=x86_64-apple-darwin ;;
+          Linux/aarch64|Linux/arm64) target=aarch64-unknown-linux-gnu ;;
+          Linux/x86_64) target=x86_64-unknown-linux-gnu ;;
+          *) echo '::error::skl supports macOS and glibc Linux on ARM64 or x86_64'; exit 1 ;;
+        esac
+        staging=$(mktemp -d "$RUNNER_TEMP/skl-download.XXXXXX")
+        trap 'rm -rf "$staging"' EXIT
+        archive="skl-$target.tar.gz"
+        release="https://github.com/nanoxd/skl/releases/download/$SKL_SETUP_VERSION"
+        curl --fail --silent --show-error --location --retry 3 "$release/$archive" -o "$staging/$archive"
+        curl --fail --silent --show-error --location --retry 3 "$release/$archive.sha256" -o "$staging/$archive.sha256"
+        cd "$staging"
+        # Validate the sidecar before allowing a checksum tool to read paths from it.
+        read -r expected filename extra < "$archive.sha256"
+        if [[ ! "$expected" =~ ^[[:xdigit:]]{64}$ || "$filename" != "$archive" || -n "${extra:-}" ]]; then
+          echo '::error::invalid release checksum file'
+          exit 1
+        fi
+        actual=$(shasum -a 256 "$archive")
+        if [[ "${actual%% *}" != "$expected" ]]; then
+          echo '::error::release checksum mismatch'
+          exit 1
+        fi
+        tar -xzf "$archive" skl
+        if [[ ! -f skl || -L skl ]]; then
+          echo '::error::release does not contain a regular skl executable'
+          exit 1
+        fi
+        destination=$(mktemp -d "$RUNNER_TEMP/skl-bin.XXXXXX")
+        install -m 755 skl "$destination/skl"
+        "$destination/skl" --version
+        echo "$destination" >> "$GITHUB_PATH"
+        echo "path=$destination" >> "$GITHUB_OUTPUT"
