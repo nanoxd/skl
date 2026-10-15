@@ -6,6 +6,10 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- Explicit `adopt NAME --from AGENT` snapshots unmanaged installed skills into
+  portable local configuration, with dry-run and registration-only modes, source
+  preservation, and ordinary sync conflict/backup handling.
+
 - Exact-name exclusions for wildcard repository groups, with explicit overrides
   and persistent exclusions when removing discovered wildcard skills.
 

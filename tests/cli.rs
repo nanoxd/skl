@@ -3952,3 +3952,271 @@ fn remove_undiscovered_wildcard_override_handles_inline_tables() {
     assert!(!e.codex("a").exists());
     assert!(e.codex("b").exists());
 }
+
+#[test]
+fn adopt_snapshots_without_claiming_original_and_force_backs_it_up() {
+    let env = Env::new();
+    let original = env.home.join(".claude/skills/review");
+    write_skill(&original, "review", "original");
+    fs::write(original.join("notes.txt"), "keep me").unwrap();
+    let out = env.skl(&["adopt", "review", "--from", "claude-code"]);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("existing paths remain conflicts"));
+    let snapshot = env.config("local/review");
+    assert_eq!(
+        fs::read_to_string(snapshot.join("notes.txt")).unwrap(),
+        "keep me"
+    );
+    assert!(
+        !fs::symlink_metadata(&original)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(
+        fs::read_link(env.home.join(".agents/skills/review"))
+            .unwrap()
+            .ends_with("local/review")
+    );
+    fs::write(original.join("notes.txt"), "changed").unwrap();
+    assert_eq!(
+        fs::read_to_string(snapshot.join("notes.txt")).unwrap(),
+        "keep me"
+    );
+    env.ok(&["sync", "--force"]);
+    assert_eq!(fs::read_link(&original).unwrap(), snapshot);
+    assert!(
+        fs::read_to_string(env.config("skills.toml"))
+            .unwrap()
+            .contains("local/review")
+    );
+    env.fails(&["adopt", "review", "--from", "claude-code"]);
+}
+
+#[test]
+fn adopt_dry_run_and_invalid_sources_do_not_write() {
+    let env = Env::new();
+    let original = env.home.join(".claude/skills/review");
+    write_skill(&original, "review", "original");
+    env.ok(&["adopt", "review", "--from", "claude-code", "--dry-run"]);
+    assert!(!env.config("skills.toml").exists());
+    assert!(!env.config("local").exists());
+    assert!(!env.home.join(".local/share/skl").exists());
+    std::os::unix::fs::symlink("missing", original.join("escape")).unwrap();
+    assert!(
+        env.fails(&["adopt", "review", "--from", "claude-code"])
+            .contains("nested symlinks")
+    );
+    assert!(!env.config("skills.toml").exists());
+    assert!(!env.config("local").exists());
+}
+
+#[test]
+fn adopt_custom_symlink_source_preserves_link_and_manifest_comments() {
+    let env = Env::new();
+    let source = env.home.join("external/review");
+    write_skill(&source, "review", "original");
+    let agent = env.home.join("custom");
+    fs::create_dir_all(&agent).unwrap();
+    std::os::unix::fs::symlink(&source, agent.join("review")).unwrap();
+    let manifest = env.home.join("dotfiles.toml");
+    fs::write(&manifest, "# retained\n").unwrap();
+    fs::create_dir_all(env.config("")).unwrap();
+    std::os::unix::fs::symlink(&manifest, env.config("skills.toml")).unwrap();
+    env.ok(&[
+        "adopt",
+        "review",
+        "--from",
+        agent.to_str().unwrap(),
+        "--no-sync",
+    ]);
+    assert_eq!(fs::read_link(agent.join("review")).unwrap(), source);
+    assert!(
+        fs::read_to_string(&manifest)
+            .unwrap()
+            .contains("# retained")
+    );
+    assert!(
+        fs::symlink_metadata(env.config("skills.toml"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    fs::remove_dir_all(&source).unwrap();
+    assert!(env.config("local/review/SKILL.md").is_file());
+}
+
+#[test]
+fn adopt_rejects_duplicate_and_snapshot_destinations_and_rolls_back_failed_manifest() {
+    let env = Env::new();
+    write_skill(
+        &env.home.join(".claude/skills/review"),
+        "review",
+        "original",
+    );
+    env.write_manifest("[skills]\nreview = { path = '~/other' }\n");
+    assert!(
+        env.fails(&["adopt", "review", "--from", "claude-code"])
+            .contains("already in the manifest")
+    );
+    assert!(!env.config("local").exists());
+    fs::remove_file(env.config("skills.toml")).unwrap();
+    fs::create_dir_all(env.config("local/review")).unwrap();
+    assert!(
+        env.fails(&["adopt", "review", "--from", "claude-code"])
+            .contains("already exists")
+    );
+    fs::remove_dir_all(env.config("local")).unwrap();
+    // A directory at the manifest path fails before publishing a snapshot.
+    fs::create_dir(env.config("skills.toml")).unwrap();
+    env.fails(&["adopt", "review", "--from", "claude-code"]);
+    assert!(!env.config("local").exists());
+}
+
+#[test]
+fn adopt_project_snapshot_is_portable_and_scoped() {
+    let env = Env::new();
+    let project = env.home.join("project");
+    write_skill(&project.join(".claude/skills/review"), "review", "original");
+    env.ok(&[
+        "--project",
+        project.to_str().unwrap(),
+        "adopt",
+        "review",
+        "--from",
+        "claude-code",
+        "--no-sync",
+        "--agent",
+        "codex",
+    ]);
+    assert!(project.join("local/review/SKILL.md").is_file());
+    let text = fs::read_to_string(project.join("skills.toml")).unwrap();
+    assert!(text.contains("local/review"));
+    assert!(text.contains("codex"));
+    assert!(!env.config("skills.toml").exists());
+}
+
+#[test]
+fn adopt_rejects_snapshot_inside_source() {
+    let env = Env::new();
+    write_skill(&env.config(""), "skl", "original");
+    assert!(
+        env.fails(&["adopt", "skl", "--from", "~/.config", "--no-sync"])
+            .contains("inside the installed source")
+    );
+    assert!(!env.config("local").exists());
+}
+
+#[test]
+fn adopt_rejects_local_snapshot_parent_symlink_into_source() {
+    let env = Env::new();
+    let source = env.home.join(".claude/skills/review");
+    write_skill(&source, "review", "original");
+    fs::create_dir_all(env.config("")).unwrap();
+    std::os::unix::fs::symlink(&source, env.config("local")).unwrap();
+    assert!(
+        env.fails(&["adopt", "review", "--from", "claude-code", "--no-sync"])
+            .contains("must be a real directory")
+    );
+    assert!(!env.config("skills.toml").exists());
+    assert_eq!(fs::read_dir(&source).unwrap().count(), 1);
+}
+
+#[test]
+fn adopt_rejects_generated_and_unknown_wildcard_names_before_copying() {
+    let env = Env::new();
+    write_skill(
+        &env.home.join(".claude/skills/review"),
+        "review",
+        "original",
+    );
+    env.write_manifest("[xcode]\nskills = ['review']\n");
+    assert!(
+        env.fails(&["adopt", "review", "--from", "claude-code", "--no-sync"])
+            .contains("conflicts")
+    );
+    assert!(!env.config("local").exists());
+    env.write_manifest("[xcode]\nskills = '*'\n");
+    assert!(
+        env.fails(&["adopt", "review", "--from", "claude-code", "--no-sync"])
+            .contains("no complete cached export")
+    );
+    assert!(!env.config("local").exists());
+}
+
+#[test]
+fn adopt_rejects_cached_repository_membership_collision() {
+    let env = Env::new();
+    let url = env.repo("group", &[("review", "review")]);
+    env.write_manifest(&format!(
+        "agents = ['codex']\n[repositories.tools]\nsource = '{url}'\nskills = '*'\n"
+    ));
+    write_skill(
+        &env.home.join(".claude/skills/review"),
+        "review",
+        "original",
+    );
+    assert!(
+        env.fails(&["adopt", "review", "--from", "claude-code", "--no-sync"])
+            .contains("coverage is missing or stale")
+    );
+    env.ok(&["sync"]);
+    assert!(
+        env.fails(&["adopt", "review", "--from", "claude-code", "--no-sync"])
+            .contains("conflicts with another declaration")
+    );
+    assert!(!env.config("local").exists());
+}
+
+#[test]
+fn adopt_rejects_missing_config_under_source_alias_without_writes() {
+    let env = Env::new();
+    let source = env.home.join(".claude/skills/review");
+    write_skill(&source, "review", "original");
+    let alias = env.home.join("alias");
+    std::os::unix::fs::symlink(&source, &alias).unwrap();
+    let config = alias.join("missing-config");
+    let out = env.skl_with_env(
+        &["adopt", "review", "--from", "claude-code", "--dry-run"],
+        &[("SKL_CONFIG_DIR", config.as_os_str())],
+    );
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("inside the installed source"));
+    assert!(!config.exists());
+    assert_eq!(fs::read_dir(&source).unwrap().count(), 1);
+}
+
+#[test]
+fn adopt_allows_locally_excluded_cached_wildcard_member() {
+    let env = Env::new();
+    let url = env.repo("group", &[("review", "review")]);
+    env.write_manifest(&format!(
+        "agents = ['codex']\n[repositories.tools]\nsource = '{url}'\nskills = '*'\n"
+    ));
+    env.ok(&["sync"]);
+    env.ok(&["remove", "review"]);
+    write_skill(
+        &env.home.join(".claude/skills/review"),
+        "review",
+        "local replacement",
+    );
+    env.ok(&["adopt", "review", "--from", "claude-code", "--no-sync"]);
+    env.ok(&["sync"]);
+    let manifest = fs::read_to_string(env.config("skills.toml")).unwrap();
+    assert!(manifest.contains("exclude = [\"review\"]"));
+    assert!(manifest.contains("local/review"));
+    assert_eq!(
+        fs::read_link(env.codex("review")).unwrap(),
+        env.config("local/review")
+    );
+    assert!(
+        fs::read_to_string(env.config("local/review/SKILL.md"))
+            .unwrap()
+            .contains("local replacement")
+    );
+    assert!(
+        !fs::symlink_metadata(env.claude("review"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
