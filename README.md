@@ -225,6 +225,7 @@ skl add owner/repo --no-sync       # only edit the manifest
 skl remove notes             # remove from the manifest and unlink
 
 skl info review              # provenance, selection rules, content and link ownership
+skl doctor                   # diagnose installation problems without changing files
 skl list                     # skills, locked commits, missing links, unmanaged skills
 
 skl profile                  # show the active profiles and where they came from
@@ -473,3 +474,12 @@ After a partial apply, generate a new plan against the new lock baseline. Treat
 plans as trusted review artifacts: their checksum catches accidental edits but is
 not a signature or authentication mechanism. Keep a plan private if its embedded
 manifest contains private repository URLs or other sensitive configuration.
+
+`skl doctor` checks the active profiles and OS for missing skills, invalid cached
+`SKILL.md` files, missing or conflicting links, stale ownership records, and
+required tools on PATH. It prints remedies and exits with status 1 when problems
+are found (0 when healthy). It never changes files, takes a run lock, invokes
+external tools, or contacts the network. It checks cached Xcode exports without
+exporting new skills. Matching user-created links remain healthy and unowned. Local `SKILL.md`
+symlinks are accepted; cached Git/Xcode skill files must be regular files. Diagnostics describe a point-in-time view; rerun after
+a concurrent sync finishes.

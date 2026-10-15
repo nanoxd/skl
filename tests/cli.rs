@@ -1868,3 +1868,211 @@ fn info_rejects_symlinked_skill_documents_in_git_store() {
     assert!(out.contains("missing SKILL.md"));
     assert!(out.contains("broken (owned)"));
 }
+
+#[test]
+fn doctor_is_read_only_and_filters_inactive_skills() {
+    let env = Env::new();
+    env.write_manifest("[skills]\nabsent = { path = '~/absent', profiles = ['work'] }\n");
+    assert!(env.ok(&["doctor"]).contains("No problems found"));
+    assert!(!env.home.join(".local/share/skl").exists());
+    let before = fs::read(env.config("skills.toml")).unwrap();
+    let out = env.skl(&["--profile", "work", "doctor"]);
+    assert!(!out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("missing-local-skill"));
+    assert!(text.contains("missing-link"));
+    assert_eq!(before, fs::read(env.config("skills.toml")).unwrap());
+    assert!(!env.config("skills.lock").exists());
+    assert!(!env.home.join(".local/share/skl").exists());
+    assert!(!env.home.join(".agents").exists());
+}
+
+#[test]
+fn doctor_accepts_matching_user_links_without_claiming_ownership() {
+    let env = Env::new();
+    write_skill(&env.home.join("local"), "local", "v1");
+    env.write_manifest("[skills]\nlocal = { path = '~/local' }\n");
+    env.ok(&["sync"]);
+    assert!(env.ok(&["doctor"]).contains("No problems found"));
+    let state = env.home.join(".local/share/skl/state.toml");
+    fs::remove_file(&state).unwrap();
+    let out = env.skl(&["doctor"]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("No problems found"));
+    assert!(!state.exists());
+    assert_eq!(
+        fs::read_link(env.codex("local")).unwrap(),
+        env.home.join("local")
+    );
+}
+
+#[test]
+fn doctor_reports_repointed_broken_and_stale_owned_links() {
+    let env = Env::new();
+    write_skill(&env.home.join("local"), "local", "v1");
+    env.write_manifest("[skills]\nlocal = { path = '~/local' }\n");
+    env.ok(&["sync"]);
+    fs::remove_file(env.codex("local")).unwrap();
+    std::os::unix::fs::symlink(env.home.join("other"), env.codex("local")).unwrap();
+    fs::remove_dir_all(env.home.join("local")).unwrap();
+    env.write_manifest("[skills]\n");
+    let state = fs::read(env.home.join(".local/share/skl/state.toml")).unwrap();
+    let out = env.skl(&["doctor"]);
+    assert!(!out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    for code in ["stale-state", "broken-link", "link-conflict"] {
+        assert!(text.contains(code), "{text}");
+    }
+    assert_eq!(
+        state,
+        fs::read(env.home.join(".local/share/skl/state.toml")).unwrap()
+    );
+}
+
+#[test]
+fn doctor_rejects_symlinked_cached_skill_file_without_network() {
+    let env = Env::new();
+    let url = env.repo("repo", &[("", "example")]);
+    env.write_manifest(&format!("[skills]\nexample = '{url}'\n"));
+    env.ok(&["sync"]);
+    let target = fs::read_link(env.codex("example")).unwrap();
+    let skill_file = target.join("SKILL.md");
+    fs::rename(&skill_file, target.join("real.md")).unwrap();
+    std::os::unix::fs::symlink("real.md", &skill_file).unwrap();
+    fs::remove_dir_all(env.remote("repo")).unwrap();
+    let out = env.skl(&["doctor"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("invalid-cache"));
+    assert!(
+        fs::symlink_metadata(&skill_file)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[test]
+fn doctor_reports_invalid_configuration_without_creating_data() {
+    let env = Env::new();
+    env.write_manifest("bad = true");
+    assert!(env.fails(&["doctor"]).contains("check skills.toml"));
+    env.write_manifest("[skills]\n");
+    fs::write(env.config("skills.lock"), "version = 999\n").unwrap();
+    assert!(env.fails(&["doctor"]).contains("check skills.lock"));
+    assert!(!env.home.join(".local/share/skl").exists());
+}
+
+#[test]
+fn doctor_checks_tools_only_for_enabled_sources() {
+    let env = Env::new();
+    let other_os = if std::env::consts::OS == "macos" {
+        "linux"
+    } else {
+        "macos"
+    };
+    env.write_manifest(&format!(
+        "[skills]\nabsent = {{ source = 'example/absent', os = ['{other_os}'] }}\n"
+    ));
+    let empty_path = env.home.join("empty-bin");
+    fs::create_dir(&empty_path).unwrap();
+    let out = env.skl_with_env(&["doctor"], &[("PATH", empty_path.as_os_str())]);
+    assert!(out.status.success());
+    env.write_manifest("[skills]\nabsent = 'example/absent'\n");
+    let out = env.skl_with_env(&["doctor"], &[("PATH", empty_path.as_os_str())]);
+    assert!(!out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("`git` is not executable"));
+    assert!(text.contains("`tar` is not executable"));
+    assert!(text.contains("not-locked"));
+    assert!(!env.home.join(".local/share/skl").exists());
+}
+
+#[test]
+fn doctor_reports_stale_git_lock_entries() {
+    let env = Env::new();
+    let url = env.repo("repo", &[("", "example")]);
+    env.write_manifest(&format!("[skills]\nexample = '{url}'\n"));
+    env.ok(&["sync"]);
+    env.write_manifest("[skills]\n");
+    fs::remove_file(env.home.join(".local/share/skl/state.toml")).unwrap();
+    let out = env.skl(&["doctor"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("stale-lock"));
+}
+
+#[test]
+fn doctor_checks_cached_xcode_selection_without_exporting() {
+    let env = Env::new();
+    env.write_manifest("[xcode]\nskills = ['example']\nos = ['macos', 'linux']\n");
+    let out = env.skl(&["doctor"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("invalid-cache: example"));
+    env.write_manifest("[xcode]\nskills = '*'\nos = ['macos', 'linux']\n");
+    let out = env.skl(&["doctor"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("xcode-not-locked"));
+    env.write_manifest("[xcode]\nskills = '*'\nprofiles = ['inactive']\nos = ['macos', 'linux']\n");
+    assert!(env.ok(&["doctor"]).contains("No problems found"));
+    env.write_manifest("[skills]\n");
+    fs::write(
+        env.config("skills.lock"),
+        format!(
+            "version = 1\n[xcode.example]\nversion = '1'\ndigest = '{}'\n",
+            "a".repeat(64)
+        ),
+    )
+    .unwrap();
+    let out = env.skl(&["doctor"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("stale-lock"));
+    assert!(!env.home.join(".local/share/skl").exists());
+}
+
+#[test]
+fn doctor_allows_retained_git_lock_for_inactive_local_replacement() {
+    let env = Env::new();
+    let url = env.repo("repo", &[("", "example")]);
+    env.write_manifest(&format!("[skills]\nexample = '{url}'\n"));
+    env.ok(&["sync"]);
+    env.write_manifest("[skills]\nexample = { path = '~/local', profiles = ['inactive'] }\n");
+    env.ok(&["sync"]);
+    assert!(
+        fs::read_to_string(env.config("skills.lock"))
+            .unwrap()
+            .contains("[skills.example]")
+    );
+    assert!(env.ok(&["doctor"]).contains("No problems found"));
+}
+
+#[test]
+fn doctor_accepts_readable_local_skill_symlinks() {
+    let env = Env::new();
+    write_skill(&env.home.join("local"), "local", "v1");
+    fs::rename(
+        env.home.join("local/SKILL.md"),
+        env.home.join("local/content.md"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink("content.md", env.home.join("local/SKILL.md")).unwrap();
+    env.write_manifest("[skills]\nlocal = { path = '~/local' }\n");
+    env.ok(&["sync"]);
+    assert!(env.ok(&["doctor"]).contains("No problems found"));
+}
+
+#[test]
+fn doctor_reports_unreadable_local_skill_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = Env::new();
+    write_skill(&env.home.join("local"), "local", "v1");
+    env.write_manifest("[skills]\nlocal = { path = '~/local' }\n");
+    env.ok(&["sync"]);
+    let file = env.home.join("local/SKILL.md");
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+    // Root can read mode-000 files; only assert failure when the process cannot.
+    if fs::File::open(&file).is_err() {
+        let out = env.skl(&["doctor"]);
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stdout).contains("unreadable"));
+    }
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+}
