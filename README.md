@@ -256,6 +256,26 @@ inspected before export. Unmanaged entries can be inspected even without a manif
 skills directory that `skl` doesn't own, such as skills an app installed or leftovers
 from another tool, so you can see everything an agent will load.
 
+## Browsing repositories
+
+Run `skl discover owner/repo` (or pass a git URL) to see the resolved commit,
+all available skill names, their subdirectories, and descriptions before installing.
+Use `--ref` to inspect a branch, tag, or full commit SHA:
+
+```sh
+skl discover anthropics/skills
+skl discover owner/repo --ref v1.0
+```
+
+Discovery needs no manifest and uses a temporary repository cache that is removed
+when the command finishes. It does not change configuration, installed skills,
+links, or the run lock. A root skill has subdirectory `.`. Duplicate names remain
+separate rows so their locations are visible. As with `add`, symlinked `SKILL.md`
+files are excluded, and hidden-directory copies are omitted when visible skills exist.
+Descriptions support common plain, quoted, and multiline block frontmatter scalars;
+missing or unsupported descriptions are blank. Empty repositories with a commit
+but no skills produce a successful “No skills found” result.
+
 ## Profiles
 
 Some skills only belong on some machines. Give them `profiles`:

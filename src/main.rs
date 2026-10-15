@@ -1,4 +1,5 @@
 mod agents;
+mod discover;
 mod doctor;
 mod git;
 mod info;
@@ -96,6 +97,14 @@ enum Command {
         #[arg(long)]
         no_sync: bool,
     },
+    /// Browse skills in a git repository without installing them
+    Discover {
+        /// Repository shorthand (owner/repo) or git URL
+        source: String,
+        /// Branch, tag or full commit SHA instead of the default branch
+        #[arg(long = "ref")]
+        git_ref: Option<String>,
+    },
     /// Remove skills from the manifest and unlink them
     Remove {
         #[arg(required = true)]
@@ -191,6 +200,7 @@ fn run(cli: Cli) -> Result<bool> {
         | Command::List { .. }
         | Command::Info { .. }
         | Command::Doctor { .. }
+        | Command::Discover { .. }
         | Command::Agents {
             action: None | Some(AgentAction::List),
         } => None,
@@ -247,6 +257,7 @@ fn run(cli: Cli) -> Result<bool> {
                 sync::run(&paths, &active()?, &sync::Options::default())
             }
         }
+        Command::Discover { source, git_ref } => discover::run(&source, git_ref.as_deref()),
         Command::Remove { names } => {
             remove(&paths, &names)?;
             sync::run(&paths, &active()?, &sync::Options::default())

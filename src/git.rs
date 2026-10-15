@@ -16,6 +16,7 @@ pub struct Candidate {
     /// The `name` from SKILL.md's frontmatter, falling back to the directory name.
     pub name: String,
     pub dir_name: String,
+    pub description: Option<String>,
 }
 
 impl Git {
@@ -140,6 +141,7 @@ impl Git {
                 subdir: subdir.into(),
                 name,
                 dir_name,
+                description: frontmatter_description(&text),
             });
         }
         // Repos often mirror a skill into tool-specific hidden folders. Prefer the
@@ -285,4 +287,67 @@ fn run(cmd: &mut Command) -> Result<String> {
         bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// A display-only description. Handle common single-line and block scalars without
+/// interpreting arbitrary YAML or changing the name used by `add`.
+fn frontmatter_description(text: &str) -> Option<String> {
+    let mut lines = text.lines();
+    if lines.next()?.trim() != "---" {
+        return None;
+    }
+    let header: Vec<_> = lines
+        .by_ref()
+        .take_while(|line| line.trim_end() != "---")
+        .collect();
+    // A frontmatter section must be closed; do not inspect Markdown body text.
+    if !text.lines().skip(1).any(|line| line.trim_end() == "---") {
+        return None;
+    }
+    let (index, value) = header.iter().enumerate().find_map(|(i, line)| {
+        line.strip_prefix("description:")
+            .map(|value| (i, value.trim()))
+    })?;
+    let description = if matches!(value, "|" | "|-" | "|+" | ">" | ">-" | ">+") {
+        header[index + 1..]
+            .iter()
+            .take_while(|line| line.is_empty() || line.starts_with(' ') || line.starts_with('\t'))
+            .map(|line| line.trim())
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else if let Some(quoted) = value.strip_prefix('\'') {
+        let mut value = String::new();
+        let mut chars = quoted.chars().peekable();
+        loop {
+            match chars.next()? {
+                '\'' if chars.peek() == Some(&'\'') => {
+                    chars.next();
+                    value.push('\'');
+                }
+                '\'' => {
+                    let tail: String = chars.collect();
+                    let tail = tail.trim();
+                    if !tail.is_empty() && !tail.starts_with('#') {
+                        return None;
+                    }
+                    break value;
+                }
+                c => value.push(c),
+            }
+        }
+    } else if value.starts_with('"') {
+        // TOML basic strings share the common YAML double-quoted escapes.
+        let doc: toml::Table = format!("description = {value}").parse().ok()?;
+        doc.get("description")?.as_str()?.to_string()
+    } else {
+        if value.starts_with(['[', '{', '&', '*', '!', '|', '>']) {
+            return None;
+        }
+        value
+            .split_once(" #")
+            .map_or(value, |(text, _)| text)
+            .to_string()
+    };
+    let description = description.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!description.is_empty()).then_some(description)
 }
