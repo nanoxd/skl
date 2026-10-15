@@ -86,10 +86,10 @@ enum Command {
         source: String,
         #[command(flatten)]
         options: SkillOptions,
-        /// Skill to add from a repo with several; repeatable
+        /// Skill to add from a repository or local collection; repeatable
         #[arg(short, long = "skill")]
         skills: Vec<String>,
-        /// Add every skill in the repo
+        /// Add every skill in the repository or local collection
         #[arg(long, conflicts_with = "skills")]
         all: bool,
         /// Branch, tag or full commit SHA to follow instead of the default branch
@@ -465,19 +465,92 @@ fn add(
         std::env::current_dir()?.join(source)
     };
     let entries: Vec<(String, Item)> = if local.is_dir() {
-        if all || git_ref.is_some() || skills.len() > 1 {
-            bail!("a local directory is one skill: --all, --ref and extra --skill don't apply");
+        if git_ref.is_some() {
+            bail!("--ref does not apply to local directories");
         }
         let dir = std::path::absolute(&local)?;
-        let text = fs::read_to_string(dir.join("SKILL.md"))
-            .with_context(|| format!("{} has no SKILL.md", paths.tilde(&dir)))?;
-        let name = match skills.first() {
-            Some(name) => name.clone(),
-            None => git::frontmatter_name(&text).unwrap_or_else(|| file_name(&dir)),
+        let selected = if dir.join("SKILL.md").is_file() && !all && skills.len() <= 1 {
+            // Preserve the existing single-skill workflow, including --skill renaming.
+            let text = fs::read_to_string(dir.join("SKILL.md"))
+                .with_context(|| format!("cannot read {}", paths.tilde(&dir.join("SKILL.md"))))?;
+            let name = skills
+                .first()
+                .cloned()
+                .unwrap_or_else(|| git::frontmatter_name(&text).unwrap_or_else(|| file_name(&dir)));
+            vec![(name, dir.clone())]
+        } else {
+            let candidates = git::local_candidates(&dir)?;
+            let names = if all {
+                candidates
+                    .iter()
+                    .map(|c| c.name.clone())
+                    .collect::<Vec<_>>()
+            } else if !skills.is_empty() {
+                skills.to_vec()
+            } else if let [only] = candidates.as_slice() {
+                vec![only.name.clone()]
+            } else if candidates.is_empty() {
+                bail!("{} has no regular SKILL.md", paths.tilde(&dir));
+            } else {
+                bail!(
+                    "{} has {} skills: pick with --skill or use --all",
+                    paths.tilde(&dir),
+                    candidates.len()
+                );
+            };
+            if candidates.is_empty() {
+                bail!("{} has no regular SKILL.md", paths.tilde(&dir));
+            }
+            let mut selected = Vec::new();
+            for name in names {
+                let by_name = candidates
+                    .iter()
+                    .filter(|c| c.name == name)
+                    .collect::<Vec<_>>();
+                let matches = if by_name.is_empty() {
+                    candidates
+                        .iter()
+                        .filter(|c| c.dir_name == name)
+                        .collect::<Vec<_>>()
+                } else {
+                    by_name
+                };
+                match matches.as_slice() {
+                    [one] => selected.push((name, dir.join(&one.subdir))),
+                    [] => bail!("{} has no skill named `{name}`", paths.tilde(&dir)),
+                    _ => bail!(
+                        "several local skills match `{name}` ({}): add each directory separately with a unique --skill name",
+                        matches
+                            .iter()
+                            .map(|c| c.subdir.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                }
+            }
+            selected
         };
-        let mut table = InlineTable::new();
-        table.insert("path", paths.tilde(&dir).into());
-        vec![(name, value(table))]
+        let config_real = paths.config.canonicalize().ok();
+        selected
+            .into_iter()
+            .map(|(name, dir)| {
+                let mut table = InlineTable::new();
+                // Paths inside the manifest directory remain portable with dotfiles.
+                let path = dir
+                    .strip_prefix(&paths.config)
+                    .ok()
+                    .or_else(|| {
+                        config_real
+                            .as_ref()
+                            .and_then(|config| dir.strip_prefix(config).ok())
+                    })
+                    .filter(|relative| !relative.as_os_str().is_empty())
+                    .map(|relative| relative.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| paths.tilde(&dir));
+                table.insert("path", path.into());
+                (name, value(table))
+            })
+            .collect()
     } else {
         let url = manifest::source_url(source)?;
         let git = Git::new(paths.repos());
@@ -512,6 +585,28 @@ fn add(
                 have.join("\n  ")
             );
         };
+        // Reject ambiguous names before editing the manifest, including --no-sync.
+        for name in &names {
+            let by_name: Vec<_> = candidates.iter().filter(|c| &c.name == name).collect();
+            let matches = if by_name.is_empty() {
+                candidates
+                    .iter()
+                    .filter(|c| &c.dir_name == name)
+                    .collect::<Vec<_>>()
+            } else {
+                by_name
+            };
+            if matches.len() > 1 {
+                bail!(
+                    "several skills in {source} match `{name}` ({}): set `subdir` in the manifest",
+                    matches
+                        .iter()
+                        .map(|c| c.subdir.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+        }
         names
             .into_iter()
             .map(|name| {

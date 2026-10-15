@@ -6,6 +6,9 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- Local collection imports with `add DIRECTORY --all` or repeatable `--skill`,
+  retaining live local paths and rejecting ambiguous selections before manifest edits.
+
 - Saved Git update plans with `update --plan FILE` and `update --apply-plan FILE`: review full patches, install exact commits, and reject stale manifest, lock or machine context. Planning writes only a new plan file and does not support Xcode manifests.
 - Versioned JSON output for `skl list`, `skl info`, and `skl doctor`, including
   selection, provenance, ownership, unmanaged entries, and structured errors.
@@ -34,6 +37,10 @@ All notable changes to this project are documented here.
 - Linux ARM64 (glibc) release binaries and CI coverage.
 
 ### Fixed
+
+- Skill discovery retains unique hidden skills, including `.curated` and
+  `.experimental` collections, while suppressing hidden mirrors of visible names.
+  Ambiguous Git additions fail before editing the manifest.
 
 - Automatically version unreleased changelog entries when a release tag is pushed
   and save the updated changelog to the default branch.
