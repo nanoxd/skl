@@ -9,6 +9,7 @@ mod manifest;
 mod paths;
 mod plan;
 mod profile;
+mod source;
 mod sync;
 mod xcode;
 
@@ -95,6 +96,9 @@ enum Command {
         /// Branch, tag or full commit SHA to follow instead of the default branch
         #[arg(long = "ref")]
         git_ref: Option<String>,
+        /// Directory containing the skill within the repository
+        #[arg(long)]
+        subdir: Option<String>,
         /// Only edit the manifest
         #[arg(long)]
         no_sync: bool,
@@ -336,9 +340,11 @@ fn run(cli: Cli) -> Result<bool> {
             skills,
             all,
             git_ref,
+            subdir,
             no_sync,
         } => {
-            add(&paths, &source, &skills, all, git_ref, &options)?;
+            let source = source::Source::parse(&source, git_ref.as_deref(), subdir.as_deref())?;
+            add(&paths, &source, &skills, all, &options)?;
             if no_sync {
                 Ok(true)
             } else {
@@ -452,21 +458,33 @@ fn configure_agents(paths: &Paths, action: Option<AgentAction>) -> Result<bool> 
 
 fn add(
     paths: &Paths,
-    source: &str,
+    input: &source::Source,
     skills: &[String],
     all: bool,
-    git_ref: Option<String>,
     options: &SkillOptions,
 ) -> Result<()> {
     options.validate(paths)?;
+    let source = input.repository.as_str();
+    let git_ref = &input.git_ref;
+    let subdir = &input.subdir;
+    let selected;
+    let skills = if let Some(skill) = &input.skill {
+        if all || (!skills.is_empty() && skills != [skill.clone()]) {
+            bail!("@skill conflicts with --all or --skill");
+        }
+        selected = vec![skill.clone()];
+        &selected[..]
+    } else {
+        skills
+    };
     let local = if source.starts_with('~') {
         paths.expand(source)
     } else {
         std::env::current_dir()?.join(source)
     };
     let entries: Vec<(String, Item)> = if local.is_dir() {
-        if git_ref.is_some() {
-            bail!("--ref does not apply to local directories");
+        if git_ref.is_some() || subdir.is_some() {
+            bail!("--ref and --subdir do not apply to local directories");
         }
         let dir = std::path::absolute(&local)?;
         let selected = if dir.join("SKILL.md").is_file() && !all && skills.len() <= 1 {
@@ -554,9 +572,9 @@ fn add(
     } else {
         let url = manifest::source_url(source)?;
         let git = Git::new(paths.repos());
-        let commit = git.resolve(&url, git_ref.as_deref())?;
+        let commit = input.resolve(&git, &url)?;
         let repo = git.ensure_commit(&url, &commit)?;
-        let candidates = git.candidates(&repo, &commit)?;
+        let candidates = git.candidates_in(&repo, &commit, subdir.as_deref())?;
         let names: Vec<String> = if all {
             candidates.iter().map(|c| c.name.clone()).collect()
         } else if !skills.is_empty() {
@@ -610,12 +628,17 @@ fn add(
         names
             .into_iter()
             .map(|name| {
-                let item = match &git_ref {
-                    None => value(source),
-                    Some(r) => {
+                let item = match (git_ref, subdir) {
+                    (None, None) => value(source),
+                    (reference, directory) => {
                         let mut table = InlineTable::new();
                         table.insert("source", source.into());
-                        table.insert("ref", r.as_str().into());
+                        if let Some(r) = reference {
+                            table.insert("ref", r.as_str().into());
+                        }
+                        if let Some(d) = directory {
+                            table.insert("subdir", d.as_str().into());
+                        }
                         value(table)
                     }
                 };

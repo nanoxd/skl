@@ -2730,3 +2730,116 @@ fn local_collection_empty_and_root_skill_behavior() {
     fs::write(root.join("nested/SKILL.md"), "live edit").unwrap();
     assert_eq!(body(&env.claude("child")), "live edit");
 }
+
+#[test]
+fn source_inputs_tree_urls_and_shorthand_normalize() {
+    for hosted in [
+        "https://github.com/acme/catalog",
+        "https://gitlab.example/acme/team/catalog",
+    ] {
+        let env = Env::new();
+        let url = env.repo("catalog", &[("skills/one", "one"), ("skills/two", "two")]);
+        // Use an explicit per-test config, never the real user's global config.
+        fs::write(
+            env.home.join(".gitconfig"),
+            format!("[url \"{url}\"]\n insteadOf = {hosted}\n"),
+        )
+        .unwrap();
+        let marker = if hosted.contains("github.com") {
+            "tree"
+        } else {
+            "-/tree"
+        };
+        let tree = format!("{hosted}/{marker}/main/skills/one");
+        let discovered = env.ok(&["discover", &tree]);
+        assert!(discovered.contains("one\tskills/one"));
+        assert!(!discovered.contains("two\tskills/two"));
+        env.ok(&["add", &tree]);
+        assert!(env.claude("one").is_symlink());
+        let manifest: toml::Table = fs::read_to_string(env.config("skills.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(manifest["skills"]["one"]["source"].as_str(), Some(hosted));
+        assert_eq!(manifest["skills"]["one"]["ref"].as_str(), Some("main"));
+        assert_eq!(
+            manifest["skills"]["one"]["subdir"].as_str(),
+            Some("skills/one")
+        );
+        env.ok(&["sync", "--locked"]);
+    }
+    let env = Env::new();
+    let url = env.repo("catalog", &[("one", "one"), ("two", "two")]);
+    fs::write(
+        env.home.join(".gitconfig"),
+        format!("[url \"{url}\"]\n insteadOf = https://github.com/acme/catalog.git\n"),
+    )
+    .unwrap();
+    env.ok(&["add", "acme/catalog@two"]);
+    assert!(env.claude("two").is_symlink());
+    assert!(!env.claude("one").exists());
+    assert!(
+        env.fails(&["add", "acme/catalog@one", "--all"])
+            .contains("conflicts")
+    );
+}
+
+#[test]
+fn explicit_subdir_selects_hidden_duplicate_and_root() {
+    let env = Env::new();
+    let url = env.repo(
+        "catalog",
+        &[("", "root"), ("visible", "same"), (".hidden", "same")],
+    );
+    env.ok(&["add", &url, "--subdir", ".hidden"]);
+    assert!(
+        fs::read_to_string(env.config("skills.lock"))
+            .unwrap()
+            .contains(".hidden")
+    );
+    env.ok(&["add", &url, "--subdir", "."]);
+    assert!(env.claude("root").is_symlink());
+    env.ok(&["sync", "--locked"]);
+    let before = fs::read(env.config("skills.toml")).unwrap();
+    assert!(
+        env.fails(&["add", &url, "--subdir", "../escape"])
+            .contains("inside")
+    );
+    env.fails(&["add", &url, "--subdir", "missing"]);
+    assert_eq!(before, fs::read(env.config("skills.toml")).unwrap());
+}
+
+#[test]
+fn tree_url_explicit_slash_ref_and_conflicts() {
+    let env = Env::new();
+    let url = env.repo("catalog", &[("skills/one", "one")]);
+    git(&env.remote("catalog"), &["branch", "feature/topic"]);
+    fs::write(
+        env.home.join(".gitconfig"),
+        format!("[url \"{url}\"]\n insteadOf = https://github.com/acme/catalog\n"),
+    )
+    .unwrap();
+    let tree = "https://github.com/acme/catalog/tree/feature/topic/skills/one";
+    assert!(env.fails(&["add", tree]).contains("specify --ref"));
+    env.ok(&["add", tree, "--ref", "feature/topic"]);
+    assert!(
+        fs::read_to_string(env.config("skills.toml"))
+            .unwrap()
+            .contains("feature/topic")
+    );
+    assert!(
+        env.fails(&["add", tree, "--ref", "main"])
+            .contains("does not match")
+    );
+    assert!(
+        env.fails(&[
+            "add",
+            tree,
+            "--ref",
+            "feature/topic",
+            "--subdir",
+            "elsewhere"
+        ])
+        .contains("conflicts")
+    );
+}
