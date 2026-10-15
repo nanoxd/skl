@@ -26,14 +26,79 @@ pub struct Options {
     pub update: Option<Vec<String>>,
     /// Print the full diff of each changed skill, not just which files changed.
     pub patch: bool,
+    pub plan: Option<PathBuf>,
+    pub apply_plan: Option<PathBuf>,
 }
 
 /// Brings the lock, the store and every agent's links in line with the manifest.
 /// Returns false when some skill or link couldn't be put in place.
 pub fn run(paths: &Paths, active: &Active, opts: &Options) -> Result<bool> {
+    let temporary = (opts.dry_run || opts.plan.is_some())
+        .then(tempfile::tempdir)
+        .transpose()?;
+    let git = Git::new(
+        temporary
+            .as_ref()
+            .map_or_else(|| paths.repos(), |t| t.path().join("repos")),
+    );
+    let baseline = opts
+        .plan
+        .as_ref()
+        .map(|_| crate::plan::Context::read(paths, active))
+        .transpose()?;
+    let saved = opts
+        .apply_plan
+        .as_ref()
+        .map(|file| crate::plan::Plan::load(file, paths, active))
+        .transpose()?;
+    let options = Options {
+        dry_run: opts.dry_run || opts.plan.is_some(),
+        force: opts.force,
+        locked: opts.locked,
+        patch: opts.patch,
+        update: saved
+            .as_ref()
+            .map(|p| p.names.clone())
+            .or_else(|| opts.update.clone()),
+        ..Default::default()
+    };
+    if opts.plan.is_some() || saved.is_some() {
+        crate::plan::check_manifest(paths)?;
+    }
+    let (ok, lock) = run_inner(
+        paths,
+        active,
+        &options,
+        &git,
+        saved.as_ref().map(|p| &p.target),
+    )?;
+    if let Some(file) = &opts.plan {
+        if !ok {
+            bail!("update plan was not saved because some skills or links failed");
+        }
+        crate::plan::Plan::save(
+            file,
+            paths,
+            active,
+            baseline.expect("planning captured a baseline"),
+            options.update.unwrap_or_default(),
+            lock,
+            &git,
+        )?;
+        println!("Saved update plan: {}", paths.tilde(file));
+    }
+    Ok(ok)
+}
+
+fn run_inner(
+    paths: &Paths,
+    active: &Active,
+    opts: &Options,
+    git: &Git,
+    planned: Option<&Lock>,
+) -> Result<(bool, Lock)> {
     let mut manifest = manifest::load(paths)?;
     let old_lock = Lock::load(&paths.lock())?;
-    let git = Git::new(paths.repos());
     let mut out = Report::new(opts.dry_run);
 
     let mut xcode_entries = BTreeMap::new();
@@ -181,11 +246,15 @@ pub fn run(paths: &Paths, active: &Active, opts: &Options) -> Result<bool> {
     }
 
     // Resolve refs once per (url, ref) and fetch once per (url, commit).
-    let refs: Vec<(String, Option<String>)> = dedup(
-        stale
-            .iter()
-            .map(|(_, o)| (o.url.clone(), o.git_ref.clone())),
-    );
+    let refs: Vec<(String, Option<String>)> = if planned.is_some() {
+        Vec::new()
+    } else {
+        dedup(
+            stale
+                .iter()
+                .map(|(_, o)| (o.url.clone(), o.git_ref.clone())),
+        )
+    };
     let resolved: BTreeMap<_, _> = refs
         .iter()
         .cloned()
@@ -197,7 +266,11 @@ pub fn run(paths: &Paths, active: &Active, opts: &Options) -> Result<bool> {
     let mut commits: BTreeMap<String, Result<(String, String), String>> = BTreeMap::new();
     for (skill, origin) in &git_skills {
         let commit = if stale.iter().any(|(s, _)| s.name == skill.name) {
-            resolved[&(origin.url.clone(), origin.git_ref.clone())].clone()
+            if let Some(plan) = planned {
+                Ok(plan.skills[&skill.name].commit.clone())
+            } else {
+                resolved[&(origin.url.clone(), origin.git_ref.clone())].clone()
+            }
         } else {
             Ok(old_lock.skills[&skill.name].commit.clone())
         };
@@ -241,14 +314,7 @@ pub fn run(paths: &Paths, active: &Active, opts: &Options) -> Result<bool> {
     for (skill, origin) in &git_skills {
         let name = &skill.name;
         let entry = if stale.iter().any(|(s, _)| &s.name == name) {
-            locate(
-                &git,
-                origin,
-                &commits[name],
-                &fetched,
-                &mut candidates,
-                name,
-            )
+            locate(git, origin, &commits[name], &fetched, &mut candidates, name)
         } else {
             Ok(old_lock.skills[name].clone())
         };
@@ -270,7 +336,7 @@ pub fn run(paths: &Paths, active: &Active, opts: &Options) -> Result<bool> {
                         } else {
                             ('~', format!("{} @ {}", entry.source, short(&entry.commit)))
                         };
-                        match describe_change(&git, old, &entry, &origin.url, opts.patch) {
+                        match describe_change(git, old, &entry, &origin.url, opts.patch) {
                             Ok(text) if text.trim().is_empty() => {
                                 out.event(mark, name, format!("{head} (its files didn't change)"))
                             }
@@ -302,6 +368,13 @@ pub fn run(paths: &Paths, active: &Active, opts: &Options) -> Result<bool> {
         }
     }
 
+    if let Some(plan) = planned {
+        for (name, entry) in &lock.skills {
+            if !failed.contains(name) && plan.skills.get(name) != Some(entry) {
+                bail!("update plan entry for `{name}` does not match the resolved skill");
+            }
+        }
+    }
     let unpack: Vec<(String, String, String)> = dedup(
         git_skills
             .iter()
@@ -322,7 +395,7 @@ pub fn run(paths: &Paths, active: &Active, opts: &Options) -> Result<bool> {
                     .ensure_commit(url, commit)
                     .map_err(|e| format!("{e:#}"))?,
             };
-            unpack_skill(&git, &repo, commit, subdir, &skill_dir(url, commit, subdir))
+            unpack_skill(git, &repo, commit, subdir, &skill_dir(url, commit, subdir))
                 .map_err(|e| format!("{e:#}"))
         });
         for ((url, commit, subdir), result) in unpack.iter().zip(results) {
@@ -422,12 +495,12 @@ pub fn run(paths: &Paths, active: &Active, opts: &Options) -> Result<bool> {
             .collect();
         collect_garbage(paths, &lock, &inactive, &state)?;
     }
-    Ok(out.finish(manifest.skills.len()))
+    Ok((out.finish(manifest.skills.len()), lock))
 }
 
 /// Summarizes how a skill's own files changed between two lock entries, as a
 /// diffstat or, with `patch`, the full diff.
-fn describe_change(
+pub(crate) fn describe_change(
     git: &Git,
     old: &LockedSkill,
     new: &LockedSkill,

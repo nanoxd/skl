@@ -424,3 +424,37 @@ workflow; reruns update the existing release and skip already saved entries.
 Pull the automated commit before preparing the next release.
 
 This automates changelog headings, not the package version in `Cargo.toml`.
+
+### Saved update plans
+
+Save exact Git commits and full patches for review, then install those same commits:
+
+```sh
+skl update --plan ./skills-update.toml
+# Or select skills: skl update my-skill --plan ./skills-update.toml
+less ./skills-update.toml
+skl update --apply-plan ./skills-update.toml --dry-run
+skl update --apply-plan ./skills-update.toml
+```
+
+Planning uses temporary repository caches and writes only the requested plan file.
+The destination must be a new file in an existing directory outside skl's config,
+data, agent skill directories and local skill directories. Existing files and
+symlink aliases are never overwritten. `--plan` conflicts with `--dry-run`;
+`--apply-plan` accepts `--dry-run` but cannot be combined with skill names or
+`--plan`.
+
+Plans contain the manifest and lock baseline, effective profiles, OS, machine
+paths, resolved destinations, exact target commits, and full Git patches. Applying
+rejects changed context instead of resolving newer branch tips. Selected updates
+still reconcile the entire manifest, as ordinary `update` does: missing or stale
+lock entries are included in the plan, and local skills and links are reconciled.
+Local skill content is not snapshotted. Xcode manifests are not supported by saved
+plans; use ordinary `update` for those manifests.
+
+A failed planning run writes no plan. Apply uses the normal ownership checks and
+keeps previous installs for skills that fail; successful skills may still update.
+After a partial apply, generate a new plan against the new lock baseline. Treat
+plans as trusted review artifacts: their checksum catches accidental edits but is
+not a signature or authentication mechanism. Keep a plan private if its embedded
+manifest contains private repository URLs or other sensitive configuration.

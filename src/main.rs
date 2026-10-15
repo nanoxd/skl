@@ -3,6 +3,7 @@ mod git;
 mod lock;
 mod manifest;
 mod paths;
+mod plan;
 mod profile;
 mod sync;
 mod xcode;
@@ -61,7 +62,14 @@ enum Command {
     /// changes first with `skl update --dry-run --patch`.
     Update {
         /// Skills to update; all of them when omitted
+        #[arg(conflicts_with = "apply_plan")]
         names: Vec<String>,
+        /// Save exact commits and full diffs for later review and application
+        #[arg(long, value_name = "FILE", conflicts_with_all = ["apply_plan", "dry_run"])]
+        plan: Option<PathBuf>,
+        /// Apply the exact commits from a saved update plan
+        #[arg(long, value_name = "FILE")]
+        apply_plan: Option<PathBuf>,
         /// Show what would change without touching the lock or any links
         #[arg(long)]
         dry_run: bool,
@@ -146,7 +154,10 @@ fn run(cli: Cli) -> Result<bool> {
     let paths = Paths::from_env()?;
     // Commands that can rewrite shared state take turns.
     let _guard = match cli.command {
-        Command::List
+        Command::Update { plan: Some(_), .. }
+        | Command::Update { dry_run: true, .. }
+        | Command::Sync { dry_run: true, .. }
+        | Command::List
         | Command::Agents {
             action: None | Some(AgentAction::List),
         } => None,
@@ -168,18 +179,23 @@ fn run(cli: Cli) -> Result<bool> {
                 locked,
                 patch,
                 update: None,
+                ..Default::default()
             },
         ),
         Command::Update {
             names,
             dry_run,
             patch,
+            plan,
+            apply_plan,
         } => sync::run(
             &paths,
             &active()?,
             &sync::Options {
                 dry_run,
                 patch,
+                plan,
+                apply_plan,
                 update: Some(names),
                 ..Default::default()
             },
