@@ -19,14 +19,16 @@ Commands: `sync`, `update`, `add`, `remove`, `list`, `profile`, `agents`. Skills
 - `src/paths.rs`: every location, from `HOME`, `SKL_CONFIG_DIR`/`XDG_CONFIG_HOME` and `SKL_DATA_DIR`/`XDG_DATA_HOME`.
 - `src/profile.rs`: resolves the active profiles from `--profile`, `SKL_PROFILE`, then the machine's saved setting.
 - `tests/cli.rs`: end-to-end tests that run the built binary.
+- `examples/skills.toml`: annotated starter manifest for users.
+- `tools/`: release maintainer binaries, enabled by the `maintainer-tools` feature.
 
 ## Commands
 
 ```bash
-cargo build
-cargo test
+cargo build --all-features
+cargo test --all-features
 cargo fmt --check
-cargo clippy --all-targets -- -D warnings
+cargo clippy --all-features --all-targets -- -D warnings
 ```
 
 CI runs all of these on macOS and Linux with stable Rust, and builds with the MSRV (`rust-version` in `Cargo.toml`, currently 1.88 for let-chains). Releases are built by `.github/workflows/release.yml` when a `v*` tag is pushed.

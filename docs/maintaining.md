@@ -13,10 +13,10 @@ Development, releases, and documentation publishing.
 From the repository root, run:
 
 ```sh
-cargo build
-cargo test
+cargo build --all-features
+cargo test --all-features
 cargo fmt --check
-cargo clippy --all-targets -- -D warnings
+cargo clippy --all-features --all-targets -- -D warnings
 ```
 
 See [AGENTS.md](https://github.com/nanoxd/skl/blob/main/AGENTS.md) for architecture,
@@ -54,13 +54,28 @@ changelog update. Protected-branch rules may require allowing the release bot.
 Concurrent pushes fail safely without force-pushing; rerun the failed release
 job to retry. Repeating an unchanged release does not create another formula
 commit. To update manually, download all four archives and `.sha256` sidecars
-into `dist`, then run `cargo run --locked --example update_homebrew -- vX.Y.Z dist`.
+into `dist`, then run
+`cargo run --locked --features maintainer-tools --bin update_homebrew -- vX.Y.Z dist`.
 
 Validate the updated formula with `brew style nanoxd/skl/skl`, then reinstall
 and run `brew test nanoxd/skl/skl` using a tap checkout containing the update.
 The formula test installs, syncs, and removes a local skill in a temporary home.
 See Homebrew's [tap documentation](https://docs.brew.sh/How-to-Create-and-Maintain-a-Tap)
 for working with a local tap checkout.
+
+## Repository examples and tools
+
+[`examples/skills.toml`](https://github.com/nanoxd/skl/blob/main/examples/skills.toml)
+is an annotated starter manifest for users. Copy it to `~/.config/skl/skills.toml`
+or a project's root and adapt it before syncing.
+
+The `tools/` directory contains the maintainer binaries used by the
+release workflow: `prepare_release` prepares changelog entries and release notes;
+`update_homebrew` updates the formula from verified release artifacts. Run them
+from the repository root with
+`cargo run --locked --features maintainer-tools --bin NAME -- …`.
+The `maintainer-tools` feature enables these binaries for release work; normal
+builds and installs include only the `skl` CLI.
 
 ## Publishing the documentation
 

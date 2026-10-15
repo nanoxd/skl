@@ -1,0 +1,26 @@
+# Save as ~/.config/skl/skills.toml, then run `skl sync`.
+# Commit this file and the generated skills.lock to your dotfiles.
+# For a team, save it at the project root and run `skl --project . sync`.
+
+# These are also the default agents when this line is omitted.
+agents = ["claude-code", "codex"]
+
+[skills]
+# Install one skill from a Git repository. skills.lock pins its exact commit.
+skill-creator = { source = "anthropics/skills", subdir = "skills/skill-creator" }
+
+# Uncomment and adapt these entries for your own setup:
+
+# A skill in your dotfiles, relative to this manifest's directory.
+# Local skills are linked in place; their contents aren't pinned by skills.lock.
+# my-skill = { path = "./local/my-skill" }
+
+# Restrict a skill to an agent and a machine profile.
+# notes = { source = "your-org/agent-skills", subdir = "skills/notes", agents = ["codex"], profiles = ["work"] }
+
+# Declare a repository once and select several skills.
+# [repositories.team]
+# source = "your-org/agent-skills"
+# ref = "main"
+# skills = ["review", "testing"]
+# profiles = ["work"]

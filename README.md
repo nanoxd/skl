@@ -2,9 +2,10 @@
 
 <img src="docs/assets/skl-mascot.png" alt="A playful skull mascot waving, carrying a backpack of skill cards" width="180">
 
-Keep agent skills in sync across coding agents and machines. `skl` tracks what to
-install in a manifest, pins Git versions in a lockfile, and links skills into
-Claude Code, Codex, and other agents. It leaves unmanaged files alone.
+File-based skill management for coding agents. Declare your skills in
+`skills.toml`, commit it with `skills.lock`, and run `skl sync` to install the
+pinned Git versions and link them into Claude Code, Codex, and other agents.
+Keep the files in your dotfiles for your machines or in a project for your team.
 
 ## Install
 
@@ -26,13 +27,31 @@ or Linux. Requires `git` and `tar`.
 
 ## Get started
 
+Create `~/.config/skl/skills.toml` in your editor (create the directory first if
+needed):
+
+```toml
+agents = ["claude-code", "codex"]
+
+[skills]
+skill-creator = { source = "anthropics/skills", subdir = "skills/skill-creator" }
+```
+
+Then apply it:
+
 ```sh
-skl add anthropics/skills --skill skill-creator
+skl sync
 skl list
 ```
 
-Keep `~/.config/skl/skills.toml` and `skills.lock` in your dotfiles. On another
-machine, restore those files and run `skl sync` to install the same versions.
+The manifest is the source of truth: edit it and run `skl sync` whenever you
+change your selection. `skl add`, `skl configure`, and `skl remove` are shortcuts
+that edit the same file and sync for you. See the annotated
+[example manifest](examples/skills.toml) for more options.
+
+Keep `~/.config/skl/skills.toml` and the generated `skills.lock` in your dotfiles.
+On another machine, restore those files and run `skl sync --locked` to install
+the pinned Git versions without changing the lockfile.
 
 ```sh
 skl update --dry-run --patch  # Review available updates

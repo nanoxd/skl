@@ -1308,7 +1308,7 @@ fn rejects_invalid_os_filters() {
     }
 }
 
-#[path = "../examples/prepare_release.rs"]
+#[path = "../tools/prepare_release.rs"]
 mod release_changelog;
 
 #[test]
@@ -3660,7 +3660,7 @@ fn repository_alias_only_supports_saved_plans_and_rejects_invalid_options() {
     e.ok(&["sync"]);
 }
 
-#[path = "../examples/update_homebrew.rs"]
+#[path = "../tools/update_homebrew.rs"]
 mod release_homebrew;
 
 #[test]

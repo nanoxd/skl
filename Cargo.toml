@@ -7,8 +7,22 @@ description = "Keep agent skills in sync across coding agents and machines from 
 license = "MIT"
 repository = "https://github.com/nanoxd/skl"
 readme = "README.md"
+default-run = "skl"
 keywords = ["skills", "claude-code", "codex", "agents", "cli"]
 categories = ["command-line-utilities", "development-tools"]
+
+[features]
+maintainer-tools = []
+
+[[bin]]
+name = "prepare_release"
+path = "tools/prepare_release.rs"
+required-features = ["maintainer-tools"]
+
+[[bin]]
+name = "update_homebrew"
+path = "tools/update_homebrew.rs"
+required-features = ["maintainer-tools"]
 
 [dependencies]
 anyhow = "1.0.104"
