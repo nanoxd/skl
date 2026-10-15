@@ -153,11 +153,9 @@ impl Export {
                     crate::write_atomic(&skill_file, normalized.as_bytes())?;
                     fs::set_permissions(&skill_file, permissions)?;
                 }
-                let mut hash = Sha256::new();
-                hash_tree(source, source, &mut hash)?;
                 let entry = XcodeSkill {
                     version: self.version.clone(),
-                    digest: format!("{:x}", hash.finalize()),
+                    digest: content_digest(source)?,
                 };
                 let dest = skill_dir(paths, &name, &entry);
                 if !dest.exists() {
@@ -218,6 +216,13 @@ fn discover(dir: &Path, found: &mut BTreeMap<String, PathBuf>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Digest a cached export with the same content, type, and mode encoding as installation.
+pub fn content_digest(root: &Path) -> Result<String> {
+    let mut hash = Sha256::new();
+    hash_tree(root, root, &mut hash)?;
+    Ok(format!("{:x}", hash.finalize()))
 }
 
 fn hash_tree(root: &Path, dir: &Path, hash: &mut Sha256) -> Result<()> {

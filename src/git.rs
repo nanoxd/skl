@@ -222,16 +222,48 @@ impl Git {
         run(cmd.args([old, new]))
     }
 
+    /// Export a baseline using only an existing repository. Never initialize or fetch,
+    /// including Git's implicit lazy fetching from partial clones.
+    pub fn export_cached(&self, url: &str, commit: &str, subdir: &str, dest: &Path) -> Result<()> {
+        if !is_full_sha(commit) {
+            bail!("baseline requires a full locked commit SHA");
+        }
+        let repo = self.repo_dir(url);
+        if !repo.join("HEAD").is_file() {
+            bail!("cached repository is unavailable: {}", repo.display());
+        }
+        self.export_inner(&repo, commit, subdir, dest, true)
+    }
+
     /// Writes one directory of `commit` into `dest`. The caller extracts to a temporary
     /// directory and renames it into place.
     pub fn export(&self, repo: &Path, commit: &str, subdir: &str, dest: &Path) -> Result<()> {
+        self.export_inner(repo, commit, subdir, dest, false)
+    }
+
+    fn export_inner(
+        &self,
+        repo: &Path,
+        commit: &str,
+        subdir: &str,
+        dest: &Path,
+        offline: bool,
+    ) -> Result<()> {
         let tree = if subdir.is_empty() {
             commit.to_string()
         } else {
             format!("{commit}:{subdir}")
         };
         fs::create_dir_all(dest)?;
-        let mut archive = git()
+        let mut command = git();
+        if offline {
+            command
+                .env("GIT_NO_LAZY_FETCH", "1")
+                .env("GIT_ALLOW_PROTOCOL", "")
+                .env("GIT_OPTIONAL_LOCKS", "0")
+                .args(["-c", "protocol.allow=never"]);
+        }
+        let mut archive = command
             .arg("-C")
             .arg(repo)
             .args(["archive", "--format=tar", &tree])

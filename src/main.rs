@@ -15,6 +15,7 @@ mod repositories;
 mod search;
 mod source;
 mod sync;
+mod verify;
 mod xcode;
 
 use std::collections::BTreeSet;
@@ -200,6 +201,14 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Verify cached content against pinned Git commits and Xcode digests, offline
+    Verify {
+        /// Skills to verify; all selected skills when omitted
+        names: Vec<String>,
+        /// Emit one versioned JSON document
+        #[arg(long)]
+        json: bool,
+    },
     /// Show or configure the manifest's default agent harnesses
     Agents {
         #[command(subcommand)]
@@ -313,6 +322,7 @@ fn main() -> ExitCode {
         Command::Search { json: true, .. } => Some("search"),
         Command::Info { json: true, .. } => Some("info"),
         Command::Doctor { json: true } => Some("doctor"),
+        Command::Verify { json: true, .. } => Some("verify"),
         _ => None,
     };
     match run(cli) {
@@ -355,6 +365,7 @@ fn run(cli: Cli) -> Result<bool> {
         | Command::Adopt { dry_run: true, .. }
         | Command::List { .. }
         | Command::Info { .. }
+        | Command::Verify { .. }
         | Command::Doctor { .. }
         | Command::Discover { .. }
         | Command::Add {
@@ -477,6 +488,7 @@ fn run(cli: Cli) -> Result<bool> {
             info::collect(&paths, &active()?, &name)?.print(&paths);
             Ok(true)
         }
+        Command::Verify { names, json } => verify::run(&paths, &active()?, &names, json),
         Command::Doctor { json: true } => json::doctor(&paths, &active()?),
         Command::Doctor { json: false } => doctor::run(&paths, &active()?),
         Command::Agents { action } => configure_agents(&paths, action),
