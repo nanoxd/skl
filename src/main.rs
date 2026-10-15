@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use toml_edit::{DocumentMut, InlineTable, Item, Table, value};
 
 use crate::git::Git;
@@ -84,6 +84,8 @@ enum Command {
     /// Add skills from a git repo (owner/repo or URL) or a local directory, then sync
     Add {
         source: String,
+        #[command(flatten)]
+        options: SkillOptions,
         /// Skill to add from a repo with several; repeatable
         #[arg(short, long = "skill")]
         skills: Vec<String>,
@@ -104,6 +106,25 @@ enum Command {
         /// Branch, tag or full commit SHA instead of the default branch
         #[arg(long = "ref")]
         git_ref: Option<String>,
+    },
+    /// Edit per-skill settings, then sync (use --no-sync to avoid fetching)
+    Configure {
+        #[arg(required = true)]
+        names: Vec<String>,
+        #[command(flatten)]
+        options: SkillOptions,
+        /// Inherit the manifest default agents
+        #[arg(long, conflicts_with = "agents")]
+        default_agents: bool,
+        /// Remove operating-system restrictions
+        #[arg(long, conflicts_with = "os")]
+        all_os: bool,
+        /// Remove profile restrictions
+        #[arg(long, conflicts_with = "only_profiles")]
+        all_profiles: bool,
+        /// Only edit the manifest
+        #[arg(long)]
+        no_sync: bool,
     },
     /// Remove skills from the manifest and unlink them
     Remove {
@@ -140,6 +161,72 @@ enum Command {
         #[command(subcommand)]
         action: Option<ProfileAction>,
     },
+}
+
+#[derive(Args, Default)]
+struct SkillOptions {
+    /// Replace this skill's agent destinations; repeatable (name, ~/path or /absolute/path)
+    #[arg(long = "agent", value_name = "AGENT")]
+    agents: Vec<String>,
+    /// Restrict this skill to operating systems; repeatable
+    #[arg(long, value_parser = ["macos", "linux"])]
+    os: Vec<String>,
+    /// Restrict this skill to profiles; repeatable (distinct from global --profile)
+    #[arg(long = "only-profile", value_name = "NAME")]
+    only_profiles: Vec<String>,
+}
+
+impl SkillOptions {
+    fn validate(&self, paths: &Paths) -> Result<()> {
+        for agent in &self.agents {
+            agents::resolve(agent, paths)?;
+        }
+        for profile in &self.only_profiles {
+            profile::validate(profile)?;
+        }
+        Ok(())
+    }
+
+    fn apply(&self, item: &mut Item, resets: [bool; 3]) -> Result<()> {
+        let fields = [
+            ("agents", &self.agents),
+            ("os", &self.os),
+            ("profiles", &self.only_profiles),
+        ];
+        // Resetting an absent override should not expand shorthand entries.
+        if item.is_str() && fields.iter().all(|(_, values)| values.is_empty()) {
+            return Ok(());
+        }
+        if let Some(source) = item.as_str() {
+            let mut table = InlineTable::new();
+            table.insert("source", source.into());
+            let mut replacement = toml_edit::Value::InlineTable(table);
+            *replacement.decor_mut() = item.as_value().unwrap().decor().clone();
+            *item = Item::Value(replacement);
+        }
+        let table = item
+            .as_table_like_mut()
+            .context("expected a skill source or table")?;
+        for ((key, values), reset) in fields.into_iter().zip(resets) {
+            if reset {
+                table.remove(key);
+            } else if !values.is_empty() {
+                let mut array = toml_edit::Array::new();
+                let mut seen = BTreeSet::new();
+                for entry in values {
+                    if seen.insert(entry) {
+                        array.push(entry.as_str());
+                    }
+                }
+                let mut replacement = toml_edit::Value::Array(array);
+                if let Some(old) = table.get(key).and_then(Item::as_value) {
+                    *replacement.decor_mut() = old.decor().clone();
+                }
+                table.insert(key, Item::Value(replacement));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Subcommand)]
@@ -245,12 +332,33 @@ fn run(cli: Cli) -> Result<bool> {
         ),
         Command::Add {
             source,
+            options,
             skills,
             all,
             git_ref,
             no_sync,
         } => {
-            add(&paths, &source, &skills, all, git_ref)?;
+            add(&paths, &source, &skills, all, git_ref, &options)?;
+            if no_sync {
+                Ok(true)
+            } else {
+                sync::run(&paths, &active()?, &sync::Options::default())
+            }
+        }
+        Command::Configure {
+            names,
+            options,
+            default_agents,
+            all_os,
+            all_profiles,
+            no_sync,
+        } => {
+            configure_skills(
+                &paths,
+                &names,
+                &options,
+                [default_agents, all_os, all_profiles],
+            )?;
             if no_sync {
                 Ok(true)
             } else {
@@ -348,7 +456,9 @@ fn add(
     skills: &[String],
     all: bool,
     git_ref: Option<String>,
+    options: &SkillOptions,
 ) -> Result<()> {
+    options.validate(paths)?;
     let local = if source.starts_with('~') {
         paths.expand(source)
     } else {
@@ -422,19 +532,52 @@ fn add(
     let mut doc = read_manifest_doc(paths)?;
     let table = skills_table(&mut doc)?;
     let mut added = 0;
-    for (name, item) in entries {
+    for (name, mut item) in entries {
         manifest::validate_name(&name)?;
         if table.contains_key(&name) {
-            println!("= {name} is already in the manifest");
+            if !options.agents.is_empty()
+                || !options.os.is_empty()
+                || !options.only_profiles.is_empty()
+            {
+                println!(
+                    "= {name} is already in the manifest; use `skl configure {name}` to change settings"
+                );
+            } else {
+                println!("= {name} is already in the manifest");
+            }
             continue;
         }
+        options.apply(&mut item, [false; 3])?;
         table.insert(&name, item);
         added += 1;
     }
+    manifest::parse(&doc.to_string(), paths)?;
     if added > 0 {
         write_atomic(&paths.manifest(), doc.to_string().as_bytes())?;
     }
     Ok(())
+}
+
+fn configure_skills(
+    paths: &Paths,
+    names: &[String],
+    options: &SkillOptions,
+    resets: [bool; 3],
+) -> Result<()> {
+    options.validate(paths)?;
+    let mut doc = read_manifest_doc(paths)?;
+    let table = skills_table(&mut doc)?;
+    for name in names {
+        let item = table
+            .get_mut(name)
+            .with_context(|| format!("`{name}` isn't in the manifest"))?;
+        options
+            .apply(item, resets)
+            .with_context(|| format!("configuring skill `{name}`"))?;
+    }
+    let text = doc.to_string();
+    manifest::parse(&text, paths)?;
+    write_atomic(&paths.manifest(), text.as_bytes())
 }
 
 fn remove(paths: &Paths, names: &[String]) -> Result<()> {

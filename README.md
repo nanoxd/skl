@@ -221,6 +221,9 @@ skl add owner/repo --all           # every skill in the repo
 skl add owner/repo --ref v2.0.0    # follow a branch or tag, or pin a full SHA
 skl add ~/dev/skills/my-skill      # a local skill
 skl add owner/repo --no-sync       # only edit the manifest
+skl add owner/repo --agent codex --only-profile work --os macos
+skl configure review --agent codex --only-profile work
+skl configure review notes --default-agents --all-os --all-profiles --no-sync
 
 skl remove notes             # remove from the manifest and unlink
 
@@ -232,6 +235,22 @@ skl profile                  # show the active profiles and where they came from
 skl profile set personal     # set this machine's profiles
 skl profile clear            # remove them
 ```
+
+`add` and `configure` accept repeatable `--agent AGENT`, `--os macos|linux`,
+and `--only-profile NAME`. Each supplied flag replaces that field's entire list;
+omitted fields stay unchanged. Agents may be known harness names, `~/...` paths,
+or absolute paths. `--only-profile` sets a skill's restrictions, while global
+`--profile` selects the profiles used by the ensuing sync.
+
+`configure <names...>` edits existing `[skills]` entries without fetching their
+sources to edit them. It syncs afterward unless `--no-sync` is supplied. Use
+`--default-agents`, `--all-os`, or `--all-profiles` to remove an override and
+restore the corresponding default; each reset conflicts with its setting flag.
+Batch edits validate the whole resulting manifest before writing, preserve
+comments and unspecified fields, and fail without changing the manifest if any
+name is unknown or settings are invalid. Symlinked manifests remain symlinked.
+`add` leaves existing entries unchanged, even when settings flags are supplied;
+use `configure` to change those entries. These commands do not edit `[xcode]`.
 
 `--profile <name>` works with every command and can be repeated.
 

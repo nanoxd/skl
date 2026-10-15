@@ -17,6 +17,10 @@ All notable changes to this project are documented here.
   cached skills, configuration errors, and missing tools, with actionable remedies.
 - `skl discover SOURCE [--ref REF]` browses repository skills, descriptions and
   subdirectories at a resolved commit without changing installed state.
+- Per-skill `--agent`, `--os`, and `--only-profile` flags for `add`, plus
+  `configure <names...>` to update existing entries with explicit reset flags
+  and optional `--no-sync`. Batch edits preserve comments and symlinked manifests
+  and validate the complete manifest before writing.
 
 - Xcode skill imports through `xcrun agent skills export`: configure `[xcode]`
   with `skills = "*"` or selected names, plus optional agents and profiles.
