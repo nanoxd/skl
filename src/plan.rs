@@ -95,7 +95,13 @@ pub struct Plan {
 }
 
 pub fn check_manifest(paths: &Paths) -> Result<()> {
-    if manifest::load(paths)?.xcode.is_some() {
+    let manifest = manifest::load(paths)?;
+    if !manifest.repositories.is_empty() {
+        bail!(
+            "saved update plans do not support wildcard repositories; use ordinary update for this manifest"
+        );
+    }
+    if manifest.xcode.is_some() {
         bail!(
             "saved update plans do not support Xcode imports; use ordinary update for this manifest"
         );

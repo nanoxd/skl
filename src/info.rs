@@ -127,8 +127,9 @@ pub fn collect(paths: &Paths, active: &Active, name: &str) -> Result<Report> {
     } else {
         manifest::parse("", paths)?
     };
-    let explicit = manifest.skills.iter().any(|s| s.name == name);
     let lock = Lock::load(&paths.lock())?;
+    crate::repositories::append(paths, &mut manifest, &lock.repositories)?;
+    let explicit = manifest.skills.iter().any(|s| s.name == name);
     xcode::append_skills(paths, &mut manifest, &lock.xcode)?;
     let records = sync::owned_links(paths)?;
     collect_loaded(paths, active, name, &manifest, &lock, &records, explicit)

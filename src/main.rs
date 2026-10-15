@@ -10,6 +10,7 @@ mod manifest;
 mod paths;
 mod plan;
 mod profile;
+mod repositories;
 mod search;
 mod source;
 mod sync;
@@ -773,6 +774,7 @@ fn remove(paths: &Paths, names: &[String]) -> Result<()> {
 fn list(paths: &Paths, active: &Active) -> Result<bool> {
     let mut manifest = manifest::load(paths)?;
     let lock = Lock::load(&paths.lock())?;
+    repositories::append(paths, &mut manifest, &lock.repositories)?;
     xcode::append_skills(paths, &mut manifest, &lock.xcode)?;
     let width = manifest
         .skills
@@ -789,6 +791,10 @@ fn list(paths: &Paths, active: &Active) -> Result<bool> {
         println!("Profiles: {names} ({})\n", active.from);
     }
     let mut healthy = true;
+    for alias in repositories::pending(paths, &manifest, &lock.repositories, active)? {
+        println!("Repository {alias}: wildcard coverage is missing or stale; run `skl sync`");
+        healthy = false;
+    }
     if let Some(config) = &manifest.xcode
         && config.skills.is_none()
         && !lock.xcode_all_complete

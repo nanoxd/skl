@@ -23,6 +23,7 @@ pub struct Manifest {
     pub agents: Vec<Agent>,
     pub skills: Vec<Skill>,
     pub xcode: Option<Xcode>,
+    pub repositories: std::collections::BTreeMap<String, crate::repositories::Repository>,
 }
 
 pub struct Xcode {
@@ -99,6 +100,7 @@ pub fn parse(text: &str, paths: &Paths) -> Result<Manifest> {
             .map(|id| agents::resolve(id, paths))
             .collect::<Result<_>>()?,
     };
+    let repositories = crate::repositories::parse(&mut table, &default_agents, paths)?;
     let xcode = table
         .remove("xcode")
         .map(|value| -> Result<Xcode> {
@@ -162,10 +164,16 @@ pub fn parse(text: &str, paths: &Paths) -> Result<Manifest> {
         agents: default_agents,
         skills: parsed,
         xcode,
+        repositories,
     })
 }
 
-fn parse_skill(name: &str, value: Value, default_agents: &[Agent], paths: &Paths) -> Result<Skill> {
+pub(crate) fn parse_skill(
+    name: &str,
+    value: Value,
+    default_agents: &[Agent],
+    paths: &Paths,
+) -> Result<Skill> {
     let mut table = match value {
         Value::String(source) => {
             let origin = git_origin(source, None, None)?;
