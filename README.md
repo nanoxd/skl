@@ -8,6 +8,15 @@ Claude Code, Codex, and other agents. It leaves unmanaged files alone.
 
 ## Install
 
+With Homebrew (macOS or Linux):
+
+```sh
+brew tap nanoxd/skl https://github.com/nanoxd/skl
+brew install nanoxd/skl/skl
+```
+
+Or build from source with Cargo:
+
 ```sh
 cargo install --git https://github.com/nanoxd/skl
 ```

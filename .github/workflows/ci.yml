@@ -16,6 +16,26 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  homebrew:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Homebrew/actions/setup-homebrew@f9676f1ffe2e1a720f81b2c54c51cfb99915ec14 # main
+      - name: Install and test the in-repository formula
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: |
+          brew tap --custom-remote nanoxd/skl "$GITHUB_WORKSPACE"
+          brew style nanoxd/skl/skl
+          brew install nanoxd/skl/skl
+          brew test nanoxd/skl/skl
+          brew audit --formula nanoxd/skl/skl
+
   fmt:
     runs-on: ubuntu-latest
     steps:
