@@ -4184,3 +4184,39 @@ fn adopt_rejects_missing_config_under_source_alias_without_writes() {
     assert!(!config.exists());
     assert_eq!(fs::read_dir(&source).unwrap().count(), 1);
 }
+
+#[test]
+fn adopt_allows_locally_excluded_cached_wildcard_member() {
+    let env = Env::new();
+    let url = env.repo("group", &[("review", "review")]);
+    env.write_manifest(&format!(
+        "agents = ['codex']\n[repositories.tools]\nsource = '{url}'\nskills = '*'\n"
+    ));
+    env.ok(&["sync"]);
+    env.ok(&["remove", "review"]);
+    write_skill(
+        &env.home.join(".claude/skills/review"),
+        "review",
+        "local replacement",
+    );
+    env.ok(&["adopt", "review", "--from", "claude-code", "--no-sync"]);
+    env.ok(&["sync"]);
+    let manifest = fs::read_to_string(env.config("skills.toml")).unwrap();
+    assert!(manifest.contains("exclude = [\"review\"]"));
+    assert!(manifest.contains("local/review"));
+    assert_eq!(
+        fs::read_link(env.codex("review")).unwrap(),
+        env.config("local/review")
+    );
+    assert!(
+        fs::read_to_string(env.config("local/review/SKILL.md"))
+            .unwrap()
+            .contains("local replacement")
+    );
+    assert!(
+        !fs::symlink_metadata(env.claude("review"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
