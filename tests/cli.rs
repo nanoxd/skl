@@ -2076,3 +2076,168 @@ fn doctor_reports_unreadable_local_skill_file() {
     }
     fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
 }
+
+fn json_output(out: &Output) -> serde_json::Value {
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["schema_version"], 1);
+    value
+}
+
+#[test]
+fn json_inspection_reports_missing_and_excluded_skills_without_writes() {
+    let env = Env::new();
+    env.write_manifest("agents = ['codex']\n[skills]\nz = { path = '~/z', profiles = ['work'] }\na = { path = '~/a' }\n");
+    let before = fs::read(env.config("skills.toml")).unwrap();
+    let out = env.skl(&["list", "--json"]);
+    assert!(!out.status.success());
+    let value = json_output(&out);
+    assert_eq!(value["status"], "unhealthy");
+    assert_eq!(value["data"]["skills"][0]["name"], "a");
+    assert_eq!(value["data"]["skills"][1]["enabled"], false);
+    assert_eq!(value["data"]["skills"][0]["links"][0]["status"], "missing");
+    assert_eq!(
+        value["data"]["skills"][0]["content_path"],
+        env.home.join("a").to_str().unwrap()
+    );
+    assert_eq!(value["diagnostics"].as_array().unwrap().len(), 1);
+    assert_eq!(value["diagnostics"][0]["code"], "not-linked");
+    assert_eq!(env.skl(&["list", "--json"]).stdout, out.stdout);
+    let out = env.skl(&["info", "a", "--json"]);
+    assert!(out.status.success());
+    assert_eq!(json_output(&out)["data"]["content_available"], false);
+    let out = env.skl(&["doctor", "--json"]);
+    assert!(!out.status.success());
+    let diagnostics = json_output(&out)["diagnostics"].as_array().unwrap().clone();
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d["code"] == "missing-local-skill")
+    );
+    assert!(diagnostics.iter().any(|d| d["code"] == "missing-link"));
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| d["severity"] == "error" && d["remedy"].is_string())
+    );
+    assert_eq!(fs::read(env.config("skills.toml")).unwrap(), before);
+    assert!(!env.config("skills.lock").exists());
+    assert!(!env.home.join(".local").exists());
+}
+
+#[test]
+fn json_runtime_errors_are_single_documents() {
+    let env = Env::new();
+    for file in ["skills.toml", "skills.lock"] {
+        env.write_manifest("[skills]\na = { path = '~/a' }\n");
+        fs::write(env.config(file), "invalid = [").unwrap();
+        for args in [
+            vec!["list", "--json"],
+            vec!["info", "a", "--json"],
+            vec!["doctor", "--json"],
+        ] {
+            let out = env.skl(&args);
+            assert!(!out.status.success());
+            let value = json_output(&out);
+            assert_eq!(value["status"], "error");
+            assert!(value["data"].is_null());
+            assert_eq!(value["diagnostics"][0]["code"], "runtime-error");
+            assert!(
+                value["diagnostics"][0]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains(file)
+            );
+        }
+    }
+    assert!(!env.home.join(".local").exists());
+    let out = env.skl_with_env(&["list", "--json"], &[("HOME", std::ffi::OsStr::new(""))]);
+    assert!(!out.status.success());
+    assert_eq!(json_output(&out)["status"], "error");
+}
+
+#[test]
+fn json_includes_git_provenance_owned_links_and_unmanaged_entries() {
+    let env = Env::new();
+    let url = env.repo("notes", &[("", "notes")]);
+    env.ok(&["add", &url]);
+    fs::write(env.codex("loose"), "user file").unwrap();
+    std::os::unix::fs::symlink("loose", env.codex("alias")).unwrap();
+    let state = env.home.join(".local/share/skl/state.toml");
+    let before = [
+        fs::read(&state).unwrap(),
+        fs::read(env.config("skills.lock")).unwrap(),
+    ];
+    let out = env.skl(&["list", "--json"]);
+    assert!(out.status.success());
+    let value = json_output(&out);
+    let skill = &value["data"]["skills"][0];
+    assert_eq!(skill["source"], url);
+    assert_eq!(
+        skill["locked"]["commit"],
+        git(&env.remote("notes"), &["rev-parse", "HEAD"])
+    );
+    assert_eq!(skill["links"][0]["owned"], true);
+    let unmanaged = value["data"]["unmanaged"].as_array().unwrap();
+    assert_eq!(unmanaged.len(), 2);
+    assert_eq!(unmanaged[0]["name"], "alias");
+    assert_eq!(unmanaged[0]["target"], env.codex("loose").to_str().unwrap());
+    let out = env.skl(&["info", "alias", "--json"]);
+    assert_eq!(
+        json_output(&out)["data"]["links"][0]["target"],
+        env.codex("loose").to_str().unwrap()
+    );
+    let out = env.skl(&["doctor", "--json"]);
+    assert!(out.status.success());
+    assert_eq!(json_output(&out)["status"], "ok");
+    assert_eq!(
+        before,
+        [
+            fs::read(state).unwrap(),
+            fs::read(env.config("skills.lock")).unwrap()
+        ]
+    );
+}
+
+#[test]
+fn json_reports_cached_and_undiscovered_xcode_without_exporting() {
+    let env = Env::new();
+    env.write_manifest("[xcode]\nskills = '*'\nos = ['macos', 'linux']\n");
+    let out = env.skl(&["list", "--json"]);
+    assert!(!out.status.success());
+    assert_eq!(
+        json_output(&out)["diagnostics"][0]["code"],
+        "xcode-not-locked"
+    );
+    let digest = "a".repeat(64);
+    fs::write(env.config("skills.lock"), format!("version = 1\nxcode_all_complete = true\n[xcode.apple]\nversion = 'Xcode TEST'\ndigest = '{digest}'\n")).unwrap();
+    let out = env.skl(&["info", "apple", "--json"]);
+    assert!(out.status.success());
+    let value = json_output(&out);
+    assert_eq!(value["data"]["origin"], "Xcode");
+    assert_eq!(value["data"]["xcode"]["digest"], digest);
+    let value = json_output(&env.skl(&["list", "--json"]));
+    assert_eq!(value["data"]["skills"][0], json_output(&out)["data"]);
+    assert!(!env.home.join(".local").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn json_non_utf8_unmanaged_paths_return_an_error_document() {
+    use std::os::unix::ffi::OsStringExt;
+    let env = Env::new();
+    env.write_manifest("agents = ['codex']\n");
+    fs::create_dir_all(env.codex("")).unwrap();
+    let path = env
+        .codex("")
+        .join(std::ffi::OsString::from_vec(b"invalid-\xff".to_vec()));
+    fs::write(path, "user file").unwrap();
+    let out = env.skl(&["list", "--json"]);
+    assert!(!out.status.success());
+    assert_eq!(json_output(&out)["status"], "error");
+    assert!(!env.home.join(".local").exists());
+}

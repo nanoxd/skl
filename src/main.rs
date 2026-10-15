@@ -2,6 +2,7 @@ mod agents;
 mod doctor;
 mod git;
 mod info;
+mod json;
 mod lock;
 mod manifest;
 mod paths;
@@ -102,11 +103,24 @@ enum Command {
     },
     /// Show each skill, its locked commit and whether its links are in place, then
     /// anything in the agents' skill directories that skl doesn't manage
-    List,
+    List {
+        /// Emit one versioned JSON document
+        #[arg(long)]
+        json: bool,
+    },
     /// Inspect one skill without changing files or contacting its source
-    Info { name: String },
+    Info {
+        name: String,
+        /// Emit one versioned JSON document
+        #[arg(long)]
+        json: bool,
+    },
     /// Diagnose local installation problems without changing files or using the network
-    Doctor,
+    Doctor {
+        /// Emit one versioned JSON document
+        #[arg(long)]
+        json: bool,
+    },
     /// Show or configure the manifest's default agent harnesses
     Agents {
         #[command(subcommand)]
@@ -146,11 +160,22 @@ enum ProfileAction {
 fn main() -> ExitCode {
     // Exit quietly when piped into something like `head` instead of panicking.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
-    match run(Cli::parse()) {
+    let cli = Cli::parse();
+    let json_command = match &cli.command {
+        Command::List { json: true } => Some("list"),
+        Command::Info { json: true, .. } => Some("info"),
+        Command::Doctor { json: true } => Some("doctor"),
+        _ => None,
+    };
+    match run(cli) {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::FAILURE,
         Err(err) => {
-            eprintln!("error: {err:#}");
+            if let Some(command) = json_command {
+                json::error(command, &err);
+            } else {
+                eprintln!("error: {err:#}");
+            }
             ExitCode::FAILURE
         }
     }
@@ -163,9 +188,9 @@ fn run(cli: Cli) -> Result<bool> {
         Command::Update { plan: Some(_), .. }
         | Command::Update { dry_run: true, .. }
         | Command::Sync { dry_run: true, .. }
-        | Command::List
+        | Command::List { .. }
         | Command::Info { .. }
-        | Command::Doctor
+        | Command::Doctor { .. }
         | Command::Agents {
             action: None | Some(AgentAction::List),
         } => None,
@@ -226,12 +251,15 @@ fn run(cli: Cli) -> Result<bool> {
             remove(&paths, &names)?;
             sync::run(&paths, &active()?, &sync::Options::default())
         }
-        Command::List => list(&paths, &active()?),
-        Command::Info { name } => {
+        Command::List { json: true } => json::list(&paths, &active()?),
+        Command::List { json: false } => list(&paths, &active()?),
+        Command::Info { name, json: true } => json::info(&paths, &active()?, &name),
+        Command::Info { name, json: false } => {
             info::collect(&paths, &active()?, &name)?.print(&paths);
             Ok(true)
         }
-        Command::Doctor => doctor::run(&paths, &active()?),
+        Command::Doctor { json: true } => json::doctor(&paths, &active()?),
+        Command::Doctor { json: false } => doctor::run(&paths, &active()?),
         Command::Agents { action } => configure_agents(&paths, action),
         Command::Profile { action } => {
             let changed = action.is_some();

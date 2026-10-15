@@ -131,6 +131,18 @@ pub fn collect(paths: &Paths, active: &Active, name: &str) -> Result<Report> {
     let lock = Lock::load(&paths.lock())?;
     xcode::append_skills(paths, &mut manifest, &lock.xcode)?;
     let records = sync::owned_links(paths)?;
+    collect_loaded(paths, active, name, &manifest, &lock, &records, explicit)
+}
+
+pub(crate) fn collect_loaded(
+    paths: &Paths,
+    active: &Active,
+    name: &str,
+    manifest: &manifest::Manifest,
+    lock: &Lock,
+    records: &BTreeMap<PathBuf, PathBuf>,
+    explicit: bool,
+) -> Result<Report> {
     let mut report = Report {
         name: name.into(),
         manifest: paths.manifest(),
@@ -233,7 +245,7 @@ pub fn collect(paths: &Paths, active: &Active, name: &str) -> Result<Report> {
     for path in destinations {
         report.links.push(inspect(
             path,
-            &records,
+            records,
             report.content_path.as_deref(),
             report.origin == "local",
         )?);
