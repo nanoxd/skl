@@ -4166,3 +4166,21 @@ fn adopt_rejects_cached_repository_membership_collision() {
     );
     assert!(!env.config("local").exists());
 }
+
+#[test]
+fn adopt_rejects_missing_config_under_source_alias_without_writes() {
+    let env = Env::new();
+    let source = env.home.join(".claude/skills/review");
+    write_skill(&source, "review", "original");
+    let alias = env.home.join("alias");
+    std::os::unix::fs::symlink(&source, &alias).unwrap();
+    let config = alias.join("missing-config");
+    let out = env.skl_with_env(
+        &["adopt", "review", "--from", "claude-code", "--dry-run"],
+        &[("SKL_CONFIG_DIR", config.as_os_str())],
+    );
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("inside the installed source"));
+    assert!(!config.exists());
+    assert_eq!(fs::read_dir(&source).unwrap().count(), 1);
+}

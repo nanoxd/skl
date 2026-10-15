@@ -52,8 +52,7 @@ pub fn run(
         );
     }
     let destination = local.join(name);
-    let config = std::path::absolute(&paths.config)?;
-    let config = config.canonicalize().unwrap_or(config);
+    let config = resolve_ancestors(&paths.config)?;
     ensure!(
         !config.join("local").join(name).starts_with(&resolved),
         "snapshot destination must not be inside the installed source"
@@ -128,6 +127,16 @@ pub fn run(
         return Err(error);
     }
     Ok(())
+}
+
+// Canonicalize the nearest existing ancestor even when config does not exist yet.
+fn resolve_ancestors(path: &Path) -> Result<std::path::PathBuf> {
+    if let Ok(real) = path.canonicalize() {
+        return Ok(real);
+    }
+    let path = std::path::absolute(path)?;
+    let parent = path.parent().context("path has no existing ancestor")?;
+    Ok(resolve_ancestors(parent)?.join(path.file_name().context("path has no filename")?))
 }
 
 fn validate_tree(path: &Path) -> Result<()> {
