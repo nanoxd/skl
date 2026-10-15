@@ -336,6 +336,35 @@ inspected before export. Unmanaged entries can be inspected even without a manif
 skills directory that `skl` doesn't own, such as skills an app installed or leftovers
 from another tool, so you can see everything an agent will load.
 
+## Searching the catalog
+
+```sh
+skl search swift testing
+skl search review --owner anthropics --limit 10
+skl search rust --json
+```
+
+`search` queries the public [skills.sh catalog](https://skills.sh/) and prints
+repository, skill name, install count, and a `skl add` command for each result.
+Results are sorted by install count. `--limit` defaults to 20 and accepts 1–100;
+`--owner` restricts results to a GitHub owner. Search does not install anything,
+read local configuration, require `HOME`, or create files.
+
+Your query, limit, and optional owner are sent to
+`https://skills.sh/api/search`. `SKL_SEARCH_URL` can override the complete endpoint
+URL for another compatible service or local testing. Requests have a 15-second
+timeout and responses are limited to 1 MiB. HTTP failures, malformed responses,
+and invalid repository/skill identities produce errors rather than empty results.
+Remote identities must be valid before they are displayed or used in suggested
+commands.
+
+`--json` uses the same versioned envelope as inspection commands, with
+`command: "search"`. Successful `data` contains `query`, nullable `owner`, `limit`,
+and `skills`; each skill has `name`, `source`, `installs`, and `install_command`.
+Empty results are successful with an empty `skills` array. Runtime errors use
+`status: "error"`, `data: null`, and `runtime-error` diagnostics, with no additional
+stderr output. Invalid CLI syntax still uses clap's usual stderr errors.
+
 ## Browsing repositories
 
 Run `skl discover owner/repo` (or pass a git URL) to see the resolved commit,

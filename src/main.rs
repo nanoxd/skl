@@ -9,6 +9,7 @@ mod manifest;
 mod paths;
 mod plan;
 mod profile;
+mod search;
 mod source;
 mod sync;
 mod xcode;
@@ -50,6 +51,19 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Search the skills.sh catalog without installing anything
+    Search {
+        #[arg(required = true, num_args = 1..)]
+        query: Vec<String>,
+        /// Restrict results to a GitHub owner
+        #[arg(long)]
+        owner: Option<String>,
+        /// Maximum results (1–100)
+        #[arg(long, default_value_t = 20)]
+        limit: u16,
+        #[arg(long)]
+        json: bool,
+    },
     /// Install, link and prune skills to match the manifest and lock
     Sync {
         /// Show what would change without touching the lock or any links
@@ -267,6 +281,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let json_command = match &cli.command {
         Command::List { json: true } => Some("list"),
+        Command::Search { json: true, .. } => Some("search"),
         Command::Info { json: true, .. } => Some("info"),
         Command::Doctor { json: true } => Some("doctor"),
         _ => None,
@@ -286,6 +301,15 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<bool> {
+    if let Command::Search {
+        query,
+        owner,
+        limit,
+        json,
+    } = &cli.command
+    {
+        return search::run(query, owner.as_deref(), *limit, *json);
+    }
     let paths = match &cli.project {
         Some(root) => Paths::for_project(root)?,
         None => Paths::from_env()?,
@@ -306,6 +330,7 @@ fn run(cli: Cli) -> Result<bool> {
     };
     let active = || Active::resolve(&paths, &cli.profiles);
     match cli.command {
+        Command::Search { .. } => unreachable!("search handled before resolving machine paths"),
         Command::Sync {
             dry_run,
             force,

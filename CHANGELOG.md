@@ -12,6 +12,8 @@ All notable changes to this project are documented here.
   `discover`, plus `add --subdir` for exact skill selection, including hidden
   directories and the repository root. Ambiguous slash refs require `--ref`.
 
+- Read-only `skl search QUERY` queries the skills.sh catalog with optional owner
+  filtering, result limits, safe installation suggestions, and versioned JSON.
 
 - Saved Git update plans with `update --plan FILE` and `update --apply-plan FILE`: review full patches, install exact commits, and reject stale manifest, lock or machine context. Planning writes only a new plan file and does not support Xcode manifests.
 - Versioned JSON output for `skl list`, `skl info`, and `skl doctor`, including
