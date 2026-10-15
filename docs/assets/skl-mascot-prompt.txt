@@ -1,0 +1,9 @@
+Generated with the built-in image_gen tool.
+
+Use case: logo-brand
+Asset type: reusable transparent mascot illustration for skl, a command-line tool that keeps agent skills in sync.
+Primary request: A playful chibi skull mascot, charming and welcoming. One original character with a very oversized rounded ivory skull, big expressive dark eye sockets, a tiny rounded triangular nose cavity, and a simple friendly toothy smile. Tiny compact body and stubby feet, one little hand waving. Wearing a small backpack with a few simple skill cards peeking out, suggesting a friendly collector carrying skills between machines. Keep skull as the dominant recognizable silhouette.
+Style: polished flat mascot illustration, bold clean charcoal outlines with rounded joins, simple shapes, restrained soft shading, warm ivory with a muted teal backpack accent. Cute indie developer-tool identity, legible at small sizes.
+Composition: single full-body character centered in square canvas, three-quarter view with face clearly visible, generous clear margin, no cropping.
+Background: truly transparent alpha, no backdrop, no ground plane.
+Constraints: no lettering, no watermark, no surrounding symbols, no extra characters. Playful rather than spooky; no gore, no menacing expression, no crossbones, no overly detailed anatomy.
