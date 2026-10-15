@@ -2843,3 +2843,184 @@ fn tree_url_explicit_slash_ref_and_conflicts() {
         .contains("conflicts")
     );
 }
+
+#[test]
+fn project_scope_is_explicit_and_isolated_from_global_and_other_projects() {
+    let e = Env::new();
+    let url = e.repo("scopes", &[(".", "shared")]);
+    e.ok(&["add", &url]);
+    let global_target = fs::read_link(e.codex("shared")).unwrap();
+    let global_lock = fs::read(e.config("skills.lock")).unwrap();
+    let a = e.home.join("project-a");
+    let b = e.home.join("project-b");
+    for root in [&a, &b] {
+        fs::create_dir(root).unwrap();
+        e.ok(&["--project", root.to_str().unwrap(), "add", &url]);
+        assert!(root.join("skills.toml").is_file());
+        assert!(root.join("skills.lock").is_file());
+        assert!(root.join(".claude/skills/shared/SKILL.md").is_file());
+    }
+    let a_target = fs::read_link(a.join(".agents/skills/shared")).unwrap();
+    let b_target = fs::read_link(b.join(".agents/skills/shared")).unwrap();
+    assert_ne!(a_target, b_target);
+    assert_ne!(a_target, global_target);
+    e.ok(&["remove", "shared", "--project", a.to_str().unwrap()]);
+    assert!(!a.join(".agents/skills/shared").exists());
+    assert!(b_target.join("SKILL.md").is_file());
+    assert!(global_target.join("SKILL.md").is_file());
+    assert_eq!(fs::read(e.config("skills.lock")).unwrap(), global_lock);
+    // Even with a project manifest in the working directory, scope is explicit.
+    fs::write(e.home.join("skills.toml"), "invalid toml").unwrap();
+    e.ok(&["sync", "--locked"]);
+}
+
+#[test]
+fn project_local_manifest_and_lock_are_portable_to_a_new_checkout() {
+    let e = Env::new();
+    let a = e.home.join("original");
+    let b = e.home.join("checkout");
+    write_skill(&a.join("skills/local"), "local", "local contents");
+    e.ok(&[
+        "--project",
+        a.to_str().unwrap(),
+        "add",
+        "original/skills/local",
+    ]);
+    let manifest = fs::read_to_string(a.join("skills.toml")).unwrap();
+    assert!(manifest.contains("path = \"skills/local\""), "{manifest}");
+    let url = e.repo("portable", &[(".", "remote")]);
+    e.ok(&["--project", a.to_str().unwrap(), "add", &url]);
+    write_skill(&b.join("skills/local"), "local", "checkout contents");
+    for name in ["skills.toml", "skills.lock"] {
+        fs::copy(a.join(name), b.join(name)).unwrap();
+    }
+    let lock_before = fs::read(b.join("skills.lock")).unwrap();
+    e.ok(&["--project", b.to_str().unwrap(), "sync", "--locked"]);
+    assert_eq!(fs::read(b.join("skills.lock")).unwrap(), lock_before);
+    assert_eq!(
+        fs::canonicalize(b.join(".agents/skills/local")).unwrap(),
+        fs::canonicalize(b.join("skills/local")).unwrap()
+    );
+    assert!(b.join(".agents/skills/remote/SKILL.md").is_file());
+    assert!(a.join(".agents/skills/remote/SKILL.md").is_file());
+    assert!(!e.config("skills.toml").exists());
+    assert!(!e.codex("remote").exists());
+}
+
+#[test]
+fn project_dry_run_and_locked_failure_do_not_publish_state_or_lock() {
+    let e = Env::new();
+    let project = e.home.join("project");
+    write_skill(&project.join("local"), "local", "v1");
+    fs::write(
+        project.join("skills.toml"),
+        "[skills]\nlocal = { path = 'local' }\n",
+    )
+    .unwrap();
+    let unused_config = e.home.join("unused-config");
+    let unused_data = e.home.join("unused-data");
+    let out = e.skl_with_env(
+        &["--project", project.to_str().unwrap(), "sync", "--dry-run"],
+        &[
+            ("SKL_CONFIG_DIR", unused_config.as_os_str()),
+            ("SKL_DATA_DIR", unused_data.as_os_str()),
+        ],
+    );
+    assert!(out.status.success());
+    assert!(!unused_config.exists());
+    assert!(!unused_data.exists());
+    assert!(!project.join("skills.lock").exists());
+    assert!(!project.join(".agents").exists());
+    let url = e.repo("locked-project", &[(".", "remote")]);
+    fs::write(
+        project.join("skills.toml"),
+        format!("[skills]\nremote = '{url}'\n"),
+    )
+    .unwrap();
+    e.fails(&["--project", project.to_str().unwrap(), "sync", "--locked"]);
+    assert!(!project.join("skills.lock").exists());
+    assert!(!project.join(".agents").exists());
+}
+
+#[test]
+fn project_move_preserves_ownership_and_requires_force_for_old_links() {
+    let e = Env::new();
+    let a = e.home.join("original");
+    let b = e.home.join("moved");
+    fs::create_dir(&a).unwrap();
+    let url = e.repo("moved", &[(".", "remote")]);
+    e.ok(&["--project", a.to_str().unwrap(), "add", &url]);
+    let old_target = fs::read_link(a.join(".agents/skills/remote")).unwrap();
+    fs::rename(&a, &b).unwrap();
+    // A copied/moved link is not owned by the new root's state.
+    let output = e.skl(&["--project", b.to_str().unwrap(), "sync", "--locked"]);
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(combined.contains("skl didn't create it"), "{combined}");
+    assert_eq!(
+        fs::read_link(b.join(".agents/skills/remote")).unwrap(),
+        old_target
+    );
+    e.ok(&[
+        "--project",
+        b.to_str().unwrap(),
+        "sync",
+        "--locked",
+        "--force",
+    ]);
+    assert_ne!(
+        fs::read_link(b.join(".agents/skills/remote")).unwrap(),
+        old_target
+    );
+    assert!(old_target.join("SKILL.md").is_file());
+}
+
+#[test]
+fn project_agent_paths_support_project_only_and_custom_relative_harnesses() {
+    let e = Env::new();
+    let project = e.home.join("project");
+    write_skill(&project.join("local"), "local", "v1");
+    fs::write(project.join("skills.toml"), "agents = ['eve', 'promptscript', 'cursor', './custom/skills']\n[skills]\nlocal = { path = 'local' }\n").unwrap();
+    e.ok(&["--project", project.to_str().unwrap(), "sync"]);
+    for dir in ["agent/skills", ".agents/skills", "custom/skills"] {
+        assert!(project.join(dir).join("local/SKILL.md").is_file());
+    }
+    let listing = e.ok(&["--project", project.to_str().unwrap(), "agents", "list"]);
+    assert!(listing.contains("promptscript"));
+    assert!(listing.contains("~/project/.agents/skills"));
+    e.fails(&["agents", "set", "eve"]);
+}
+
+#[test]
+fn project_collection_import_keeps_every_source_portable() {
+    let e = Env::new();
+    let project = e.home.join("project");
+    write_skill(&project.join("sources/one"), "one", "one");
+    write_skill(&project.join("sources/.curated/two"), "two", "two");
+    e.ok(&[
+        "--project",
+        project.to_str().unwrap(),
+        "add",
+        "project/sources",
+        "--all",
+    ]);
+    let manifest: toml::Table = fs::read_to_string(project.join("skills.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        manifest["skills"]["one"]["path"].as_str(),
+        Some("sources/one")
+    );
+    assert_eq!(
+        manifest["skills"]["two"]["path"].as_str(),
+        Some("sources/.curated/two")
+    );
+    e.ok(&["--project", project.to_str().unwrap(), "sync", "--locked"]);
+    assert!(project.join(".agents/skills/one/SKILL.md").is_file());
+    assert!(project.join(".agents/skills/two/SKILL.md").is_file());
+    assert!(!e.config("skills.toml").exists());
+}

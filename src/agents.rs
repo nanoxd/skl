@@ -88,6 +88,97 @@ pub const KNOWN: &[(&str, &str)] = &[
     ("zenflow", "~/.zencoder/skills"),
 ];
 
+// Project paths cross-checked against vercel-labs/skills src/agents.ts.
+pub const PROJECT: &[(&str, &str)] = &[
+    ("adal", ".adal/skills"),
+    ("aider-desk", ".aider-desk/skills"),
+    ("amp", ".agents/skills"),
+    ("antigravity", ".agents/skills"),
+    ("antigravity-cli", ".agents/skills"),
+    ("astrbot", "data/skills"),
+    ("augment", ".augment/skills"),
+    ("autohand-code", ".autohand/skills"),
+    ("bob", ".bob/skills"),
+    ("claude-code", ".claude/skills"),
+    ("cline", ".agents/skills"),
+    ("codearts-agent", ".codeartsdoer/skills"),
+    ("codebuddy", ".codebuddy/skills"),
+    ("codemaker", ".codemaker/skills"),
+    ("codestudio", ".codestudio/skills"),
+    ("codex", ".agents/skills"),
+    ("command-code", ".commandcode/skills"),
+    ("continue", ".continue/skills"),
+    ("cortex", ".cortex/skills"),
+    ("crush", ".crush/skills"),
+    ("cursor", ".agents/skills"),
+    ("deepagents", ".agents/skills"),
+    ("devin", ".devin/skills"),
+    ("dexto", ".agents/skills"),
+    ("droid", ".agents/skills"),
+    ("eve", "agent/skills"),
+    ("firebender", ".agents/skills"),
+    ("forgecode", ".forge/skills"),
+    ("fx", ".agents/skills"),
+    ("gemini-cli", ".agents/skills"),
+    ("github-copilot", ".agents/skills"),
+    ("goose", ".goose/skills"),
+    ("grok", ".grok/skills"),
+    ("hermes-agent", ".hermes/skills"),
+    ("iflow-cli", ".iflow/skills"),
+    ("inference-sh", ".inferencesh/skills"),
+    ("jazz", ".jazz/skills"),
+    ("junie", ".junie/skills"),
+    ("kilo", ".agents/skills"),
+    ("kimchi", ".kimchi/skills"),
+    ("kimi-code-cli", ".agents/skills"),
+    ("kiro-cli", ".kiro/skills"),
+    ("kode", ".kode/skills"),
+    ("lingma", ".lingma/skills"),
+    ("loaf", ".agents/skills"),
+    ("mcpjam", ".mcpjam/skills"),
+    ("minimax-code", ".minimax/skills"),
+    ("mistral-vibe", ".vibe/skills"),
+    ("moxby", ".moxby/skills"),
+    ("mux", ".mux/skills"),
+    ("neovate", ".neovate/skills"),
+    ("ona", ".ona/skills"),
+    ("openclaw", "skills"),
+    ("opencode", ".agents/skills"),
+    ("openhands", ".openhands/skills"),
+    ("pi", ".agents/skills"),
+    ("pochi", ".pochi/skills"),
+    ("posit-assistant", ".posit/assistant/skills"),
+    ("promptscript", ".agents/skills"),
+    ("qoder", ".qoder/skills"),
+    ("qoder-cn", ".qoder/skills"),
+    ("qwen-code", ".qwen/skills"),
+    ("reasonix", ".reasonix/skills"),
+    ("replit", ".agents/skills"),
+    ("roo", ".roo/skills"),
+    ("rovodev", ".rovodev/skills"),
+    ("sarvam-code", ".agents/skills"),
+    ("tabnine-cli", ".tabnine/agent/skills"),
+    ("terramind", ".terramind/skills"),
+    ("tinycloud", ".tinycloud/skills"),
+    ("trae", ".trae/skills"),
+    ("trae-cn", ".trae/skills"),
+    ("universal", ".agents/skills"),
+    ("warp", ".agents/skills"),
+    ("windsurf", ".windsurf/skills"),
+    ("zcode", ".zcode/skills"),
+    ("zed", ".agents/skills"),
+    ("zencoder", ".zencoder/skills"),
+    ("zenflow", ".zencoder/skills"),
+];
+
+pub fn known(paths: &Paths) -> &'static [(&'static str, &'static str)] {
+    if paths.project.is_some() {
+        PROJECT
+    } else {
+        KNOWN
+    }
+}
+
 pub const DEFAULT: &[&str] = &["claude-code", "codex"];
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -97,7 +188,17 @@ pub struct Agent {
 }
 
 pub fn resolve(id: &str, paths: &Paths) -> Result<Agent> {
-    if let Some((_, dir)) = KNOWN.iter().find(|(known, _)| *known == id) {
+    if let Some(root) = &paths.project
+        && let Some((_, dir)) = PROJECT.iter().find(|(known, _)| *known == id)
+    {
+        return Ok(Agent {
+            id: id.into(),
+            dir: root.join(dir),
+        });
+    }
+    if paths.project.is_none()
+        && let Some((_, dir)) = KNOWN.iter().find(|(known, _)| *known == id)
+    {
         return Ok(Agent {
             id: id.into(),
             dir: match id {
@@ -111,15 +212,18 @@ pub fn resolve(id: &str, paths: &Paths) -> Result<Agent> {
             },
         });
     }
-    if id.starts_with('~') || id.starts_with('/') {
+    if id.starts_with('~')
+        || id.starts_with('/')
+        || (paths.project.is_some() && id.starts_with("./"))
+    {
         return Ok(Agent {
             id: id.into(),
             dir: paths.expand(id),
         });
     }
-    let known: Vec<_> = KNOWN.iter().map(|(name, _)| *name).collect();
+    let known: Vec<_> = known(paths).iter().map(|(name, _)| *name).collect();
     bail!(
-        "unknown agent `{id}`: use one of {} or a path starting with ~ or /",
+        "unknown agent `{id}`: use one of {} or a path starting with ~ or / (also ./ in project scope)",
         known.join(", ")
     )
 }

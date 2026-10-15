@@ -1,11 +1,14 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
+use sha2::{Digest, Sha256};
 
 /// Every location skl reads or writes, resolved once from the environment.
 pub struct Paths {
     pub home: PathBuf,
+    /// Explicit project root; absent for machine-wide installs.
+    pub project: Option<PathBuf>,
     /// HOME with symlinks resolved, so paths from the working directory still shorten.
     home_real: Option<PathBuf>,
     pub config: PathBuf,
@@ -25,10 +28,45 @@ impl Paths {
         let home_real = home.canonicalize().ok().filter(|real| *real != home);
         Ok(Self {
             home,
+            project: None,
             home_real,
             config,
             data,
         })
+    }
+
+    /// Project configuration is portable; machine-local caches and ownership are
+    /// keyed by canonical root so separate checkouts never share ownership state.
+    pub fn for_project(root: &Path) -> Result<Self> {
+        let mut paths = Self::from_env()?;
+        let root = root
+            .canonicalize()
+            .with_context(|| format!("cannot open project {}", root.display()))?;
+        ensure!(
+            root.is_dir(),
+            "project {} is not a directory",
+            root.display()
+        );
+        let key = format!("{:x}", Sha256::digest(root.as_os_str().as_encoded_bytes()));
+        paths.config = root.clone();
+        paths.data = paths.data.join("projects").join(key);
+        paths.project = Some(root);
+        Ok(paths)
+    }
+
+    /// Keep local sources beneath the manifest directory portable across checkouts.
+    pub fn manifest_path(&self, path: &Path) -> String {
+        let config_real = self.config.canonicalize().ok();
+        let relative = path.strip_prefix(&self.config).ok().or_else(|| {
+            config_real
+                .as_ref()
+                .and_then(|config| path.strip_prefix(config).ok())
+        });
+        match relative {
+            Some(relative) if relative.as_os_str().is_empty() => ".".into(),
+            Some(relative) => relative.display().to_string(),
+            None => self.tilde(path),
+        }
     }
 
     pub fn manifest(&self) -> PathBuf {

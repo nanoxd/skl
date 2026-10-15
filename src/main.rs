@@ -36,6 +36,10 @@ use crate::profile::Active;
 #[derive(Parser)]
 #[command(version)]
 struct Cli {
+    /// Use skills.toml and skills.lock in this project, with project agent directories
+    #[arg(long, value_name = "PATH", global = true)]
+    project: Option<PathBuf>,
+
     /// Install skills for this profile instead of the machine's own; repeatable
     #[arg(long = "profile", value_name = "NAME", global = true)]
     profiles: Vec<String>,
@@ -282,7 +286,10 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<bool> {
-    let paths = Paths::from_env()?;
+    let paths = match &cli.project {
+        Some(root) => Paths::for_project(root)?,
+        None => Paths::from_env()?,
+    };
     // Commands that can rewrite shared state take turns.
     let _guard = match cli.command {
         Command::Update { plan: Some(_), .. }
@@ -412,7 +419,7 @@ fn run(cli: Cli) -> Result<bool> {
 
 fn configure_agents(paths: &Paths, action: Option<AgentAction>) -> Result<bool> {
     if matches!(action, Some(AgentAction::List)) {
-        for (id, _) in agents::KNOWN {
+        for (id, _) in agents::known(paths) {
             let agent = agents::resolve(id, paths)?;
             println!("{id:<20} {}", paths.tilde(&agent.dir));
         }
@@ -486,7 +493,11 @@ fn add(
         if git_ref.is_some() || subdir.is_some() {
             bail!("--ref and --subdir do not apply to local directories");
         }
-        let dir = std::path::absolute(&local)?;
+        let dir = if paths.project.is_some() {
+            local.canonicalize()?
+        } else {
+            std::path::absolute(&local)?
+        };
         let selected = if dir.join("SKILL.md").is_file() && !all && skills.len() <= 1 {
             // Preserve the existing single-skill workflow, including --skill renaming.
             let text = fs::read_to_string(dir.join("SKILL.md"))
@@ -548,24 +559,11 @@ fn add(
             }
             selected
         };
-        let config_real = paths.config.canonicalize().ok();
         selected
             .into_iter()
             .map(|(name, dir)| {
                 let mut table = InlineTable::new();
-                // Paths inside the manifest directory remain portable with dotfiles.
-                let path = dir
-                    .strip_prefix(&paths.config)
-                    .ok()
-                    .or_else(|| {
-                        config_real
-                            .as_ref()
-                            .and_then(|config| dir.strip_prefix(config).ok())
-                    })
-                    .filter(|relative| !relative.as_os_str().is_empty())
-                    .map(|relative| relative.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| paths.tilde(&dir));
-                table.insert("path", path.into());
+                table.insert("path", paths.manifest_path(&dir).into());
                 (name, value(table))
             })
             .collect()
