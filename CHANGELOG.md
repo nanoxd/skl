@@ -6,6 +6,8 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- Saved Git update plans with `update --plan FILE` and `update --apply-plan FILE`: review full patches, install exact commits, and reject stale manifest, lock or machine context. Planning writes only a new plan file and does not support Xcode manifests.
+
 - Xcode skill imports through `xcrun agent skills export`: configure `[xcode]`
   with `skills = "*"` or selected names, plus optional agents and profiles.
   Sync records Xcode version/build and content hashes, preserves previous installs

@@ -1528,3 +1528,168 @@ fn xdg_agent_paths_resolve_without_changing_other_harnesses() {
             .any(|l| l.starts_with("opencode ") && l.ends_with("~/.config/opencode/skills"))
     );
 }
+
+#[test]
+fn saved_update_plan_pins_reviewed_commits_and_selection() {
+    let e = Env::new();
+    let url = e.repo("plans", &[("a", "a"), ("b", "b")]);
+    e.write_manifest(&format!(
+        "[skills]\na = {{source = '{url}'}}\nb = {{source = '{url}'}}\n"
+    ));
+    e.ok(&["sync"]);
+    let initial_lock = fs::read(e.config("skills.lock")).unwrap();
+    let initial_state = fs::read(e.home.join(".local/share/skl/state.toml")).unwrap();
+    write_skill(&e.remote("plans").join("a"), "a", "reviewed");
+    write_skill(&e.remote("plans").join("b"), "b", "unselected");
+    let reviewed = commit(&e.remote("plans"), "reviewed update");
+    e.ok(&["update", "a", "--plan", "review.toml"]);
+    let plan = fs::read_to_string(e.home.join("review.toml")).unwrap();
+    assert!(plan.contains(&reviewed));
+    assert!(plan.contains("+reviewed"));
+    assert_eq!(fs::read(e.config("skills.lock")).unwrap(), initial_lock);
+    assert_eq!(
+        fs::read(e.home.join(".local/share/skl/state.toml")).unwrap(),
+        initial_state
+    );
+    assert_eq!(e.store_commits(), 1);
+    write_skill(&e.remote("plans").join("a"), "a", "unreviewed");
+    commit(&e.remote("plans"), "later change");
+    e.ok(&["update", "--apply-plan", "review.toml", "--dry-run"]);
+    assert!(body(&e.codex("a")).contains("v1"));
+    e.ok(&["update", "--apply-plan", "review.toml"]);
+    assert!(body(&e.codex("a")).contains("reviewed"));
+    assert!(!body(&e.codex("a")).contains("unreviewed"));
+    assert!(body(&e.codex("b")).contains("v1"));
+    assert!(
+        e.fails(&["update", "--apply-plan", "review.toml"])
+            .contains("stale")
+    );
+}
+
+#[test]
+fn saved_update_plan_is_read_only_and_rejects_stale_or_edited_context() {
+    let e = Env::new();
+    let url = e.repo("plans", &[("a", "a")]);
+    let manifest = format!("[skills]\na = {{source = '{url}'}}\n");
+    e.write_manifest(&manifest);
+    e.ok(&["update", "--plan", "review.toml"]);
+    assert!(!e.home.join(".local/share/skl").exists());
+    assert!(!e.config("skills.lock").exists());
+    let original = fs::read_to_string(e.home.join("review.toml")).unwrap();
+    e.write_manifest(&format!("{manifest}# changed\n"));
+    assert!(
+        e.fails(&["update", "--apply-plan", "review.toml"])
+            .contains("stale")
+    );
+    e.write_manifest(&manifest);
+    assert!(
+        e.fails(&["update", "--profile", "work", "--apply-plan", "review.toml"])
+            .contains("stale")
+    );
+    fs::write(
+        e.home.join("review.toml"),
+        original.replace("version = 1", "version = 900"),
+    )
+    .unwrap();
+    assert!(
+        e.fails(&["update", "--apply-plan", "review.toml"])
+            .contains("unsupported")
+    );
+    fs::write(
+        e.home.join("review.toml"),
+        original.replace("+v1", "+tampered"),
+    )
+    .unwrap();
+    assert!(
+        e.fails(&["update", "--apply-plan", "review.toml"])
+            .contains("checksum")
+    );
+    fs::write(e.home.join("review.toml"), "not toml").unwrap();
+    assert!(
+        e.fails(&["update", "--apply-plan", "review.toml"])
+            .contains("invalid update plan")
+    );
+}
+
+#[test]
+fn saved_update_plan_does_not_overwrite_or_write_managed_locations() {
+    let e = Env::new();
+    e.write_manifest("[skills]\n");
+    e.ok(&["update", "--plan", "review.toml"]);
+    let before = fs::read(e.home.join("review.toml")).unwrap();
+    e.fails(&["update", "--plan", "review.toml"]);
+    assert_eq!(fs::read(e.home.join("review.toml")).unwrap(), before);
+    e.fails(&["update", "--plan", ".config/skl/skills.lock"]);
+    assert!(!e.config("skills.lock").exists());
+    std::os::unix::fs::symlink(e.config("skills.toml"), e.home.join("alias")).unwrap();
+    e.fails(&["update", "--plan", "alias"]);
+    assert_eq!(
+        fs::read_to_string(e.config("skills.toml")).unwrap(),
+        "[skills]\n"
+    );
+    e.fails(&["update", "--plan", "other.toml", "--dry-run"]);
+    e.fails(&["update", "a", "--apply-plan", "review.toml"]);
+    e.fails(&[
+        "update",
+        "--plan",
+        "other.toml",
+        "--apply-plan",
+        "review.toml",
+    ]);
+}
+
+#[test]
+fn saved_update_plan_fails_without_artifact_for_missing_skill_or_xcode() {
+    let e = Env::new();
+    e.write_manifest("[skills]\na = {source = 'file:///nonexistent-plan-test'}\n");
+    e.fails(&["update", "--plan", "review.toml"]);
+    assert!(!e.home.join("review.toml").exists());
+    assert!(!e.home.join(".local/share/skl").exists());
+    e.write_manifest("[xcode]\nskills = '*'\n");
+    assert!(
+        e.fails(&["update", "--plan", "review.toml"])
+            .contains("Xcode")
+    );
+}
+
+#[test]
+fn saved_update_plan_partial_fetch_failure_keeps_previous_install() {
+    let e = Env::new();
+    let a = e.repo("a", &[("", "a")]);
+    let b = e.repo("b", &[("", "b")]);
+    e.write_manifest(&format!(
+        "[skills]\na = {{source = '{a}'}}\nb = {{source = '{b}'}}\n"
+    ));
+    e.ok(&["sync"]);
+    for name in ["a", "b"] {
+        write_skill(&e.remote(name), name, "reviewed");
+        commit(&e.remote(name), "update");
+    }
+    e.ok(&["update", "--plan", "review.toml"]);
+    fs::remove_dir_all(e.remote("b")).unwrap();
+    e.fails(&["update", "--apply-plan", "review.toml"]);
+    assert!(body(&e.codex("a")).contains("reviewed"));
+    assert!(body(&e.codex("b")).contains("v1"));
+    e.ok(&["sync", "--locked"]);
+}
+
+#[test]
+fn saved_update_plan_rejects_changed_resolved_agent_destinations() {
+    let e = Env::new();
+    e.write_manifest("agents = ['opencode']\n[skills]\n");
+    // Include a local skill to exercise resolved per-skill destinations.
+    write_skill(&e.home.join("local"), "local", "v1");
+    e.write_manifest("agents = ['opencode']\n[skills]\nlocal = {path = '~/local'}\n");
+    e.ok(&["update", "--plan", "review.toml"]);
+    let different_xdg = e.home.join("other-config");
+    let config = e.config("");
+    let output = e.skl_with_env(
+        &["update", "--apply-plan", "review.toml"],
+        &[
+            ("SKL_CONFIG_DIR", config.as_os_str()),
+            ("XDG_CONFIG_HOME", different_xdg.as_os_str()),
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("stale"));
+}
