@@ -15,6 +15,8 @@ All notable changes to this project are documented here.
   exporting skills. It also inspects unmanaged entries in configured agent directories.
 - Read-only `skl doctor` diagnostics for local installation health, link ownership,
   cached skills, configuration errors, and missing tools, with actionable remedies.
+- `skl discover SOURCE [--ref REF]` browses repository skills, descriptions and
+  subdirectories at a resolved commit without changing installed state.
 
 - Xcode skill imports through `xcrun agent skills export`: configure `[xcode]`
   with `skills = "*"` or selected names, plus optional agents and profiles.

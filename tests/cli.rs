@@ -2241,3 +2241,129 @@ fn json_non_utf8_unmanaged_paths_return_an_error_document() {
     assert_eq!(json_output(&out)["status"], "error");
     assert!(!env.home.join(".local").exists());
 }
+
+#[test]
+fn discover_lists_skills_descriptions_and_commit_without_installing() {
+    let env = Env::new();
+    let url = env.repo("browse", &[("z", "shared"), ("a", "shared"), ("", "root")]);
+    fs::write(
+        env.remote("browse").join("a/SKILL.md"),
+        "---\nname: shared\ndescription: >-\n  First line\n  second line\n---\nBody\n",
+    )
+    .unwrap();
+    fs::write(
+        env.remote("browse").join("z/SKILL.md"),
+        "---\nname: shared\ndescription: 'It''s helpful # really' # user's comment\n---  \n",
+    )
+    .unwrap();
+    let sha = commit(&env.remote("browse"), "descriptions");
+    let out = env.ok(&["discover", &url]);
+    assert!(out.contains(&format!("Commit: {sha}")));
+    assert!(out.contains("root\t.\ttest"));
+    assert!(out.contains("shared\ta\tFirst line second line"));
+    assert!(out.contains("shared\tz\tIt's helpful # really"));
+    assert!(out.find("shared\ta").unwrap() < out.find("shared\tz").unwrap());
+    assert_eq!(fs::read_dir(&env.home).unwrap().count(), 0);
+}
+
+#[test]
+fn discover_honors_ref_and_does_not_read_or_modify_installed_state() {
+    let env = Env::new();
+    let url = env.repo("browse", &[("old", "old")]);
+    let sha = git(&env.remote("browse"), &["rev-parse", "HEAD"]);
+    git(&env.remote("browse"), &["tag", "before"]);
+    fs::remove_dir_all(env.remote("browse").join("old")).unwrap();
+    write_skill(&env.remote("browse").join("new"), "new", "new");
+    commit(&env.remote("browse"), "replace");
+    env.write_manifest("invalid manifest [[[");
+    let data = env.home.join(".local/share/skl");
+    fs::create_dir_all(&data).unwrap();
+    fs::write(data.join("state.toml"), "invalid state").unwrap();
+    fs::write(env.config("skills.lock"), "invalid lock").unwrap();
+    let out = env.ok(&["discover", &url, "--ref", "before"]);
+    assert!(out.contains(&format!("Commit: {sha}")));
+    assert!(out.contains("old\told\ttest"));
+    assert!(!out.contains("new\tnew"));
+    assert!(
+        env.ok(&["discover", &url, "--ref", &sha])
+            .contains("old\told")
+    );
+    assert!(env.ok(&["discover", &url]).contains("new\tnew"));
+    assert_eq!(
+        fs::read_to_string(env.config("skills.toml")).unwrap(),
+        "invalid manifest [[["
+    );
+    assert_eq!(
+        fs::read_to_string(env.config("skills.lock")).unwrap(),
+        "invalid lock"
+    );
+    assert_eq!(
+        fs::read_to_string(data.join("state.toml")).unwrap(),
+        "invalid state"
+    );
+    assert_eq!(fs::read_dir(data).unwrap().count(), 1);
+    assert!(
+        env.fails(&["discover", &url, "--ref", "missing"])
+            .contains("no branch or tag")
+    );
+}
+
+#[test]
+fn discover_uses_regular_files_and_existing_hidden_mirror_rules() {
+    let env = Env::new();
+    let url = env.repo(
+        "browse",
+        &[("visible", "visible"), (".agents/hidden", "hidden")],
+    );
+    let symlink = env.remote("browse").join("symlink");
+    fs::create_dir_all(&symlink).unwrap();
+    std::os::unix::fs::symlink("../visible/SKILL.md", symlink.join("SKILL.md")).unwrap();
+    commit(&env.remote("browse"), "symlink");
+    let out = env.ok(&["discover", &url]);
+    assert!(out.contains("visible\tvisible"));
+    assert!(!out.contains("hidden"));
+    assert!(!out.contains("symlink"));
+    fs::remove_dir_all(env.remote("browse").join("visible")).unwrap();
+    commit(&env.remote("browse"), "hidden only");
+    assert!(
+        env.ok(&["discover", &url])
+            .contains("hidden\t.agents/hidden")
+    );
+    fs::remove_dir_all(env.remote("browse").join(".agents")).unwrap();
+    commit(&env.remote("browse"), "no regular skills");
+    assert!(env.ok(&["discover", &url]).contains("No skills found"));
+    assert_eq!(fs::read_dir(&env.home).unwrap().count(), 0);
+}
+
+#[test]
+fn discover_handles_missing_and_quoted_descriptions_without_changing_names() {
+    let env = Env::new();
+    let url = env.repo(
+        "browse",
+        &[
+            ("plain", "plain"),
+            ("quoted", "quoted"),
+            ("missing", "missing"),
+        ],
+    );
+    fs::write(
+        env.remote("browse").join("plain/SKILL.md"),
+        "---\nname: plain\ndescription: useful # comment\n---\n",
+    )
+    .unwrap();
+    fs::write(
+        env.remote("browse").join("quoted/SKILL.md"),
+        "---\nname: quoted\ndescription: \"A \\\"quote\\\" and tab\\ttext\"\n---\n",
+    )
+    .unwrap();
+    fs::write(
+        env.remote("browse").join("missing/SKILL.md"),
+        "No frontmatter\ndescription: not metadata\n",
+    )
+    .unwrap();
+    commit(&env.remote("browse"), "description formats");
+    let out = env.ok(&["discover", &url]);
+    assert!(out.contains("plain\tplain\tuseful\n"));
+    assert!(out.contains("quoted\tquoted\tA \"quote\" and tab text\n"));
+    assert!(out.contains("missing\tmissing\t\n"));
+}
