@@ -89,12 +89,14 @@ review = { repository = "team", ref = "v2.0.0", agents = ["claude-code", "codex"
 notes = { repository = "team", subdir = "skills/notes" }
 ```
 
-A repository supports `source`, `ref`, `skills`, `agents`, `profiles`, and `os`.
+A repository supports `source`, `ref`, `skills`, `exclude`, `agents`, `profiles`,
+and `os`.
 Omit `skills` (or use `[]`) for an alias-only declaration. Its `agents`, `profiles`,
 and `os` defaults apply to every selected skill and alias reference; a per-skill
 value replaces the corresponding default. `repository` cannot be combined with
-`source` or `path`. Edit group declarations in `skills.toml`; `configure` and
-`remove` operate on explicit `[skills]` entries.
+`source` or `path`. Edit group declarations in `skills.toml`; `configure`
+operates on explicit `[skills]` entries.
+`remove` also supports cached wildcard members as described below.
 
 Use `skills = "*"` to keep tracking a whole repository. Ordinary `sync` and
 `update` discover its current membership: newly discovered skills are added,
@@ -104,10 +106,27 @@ membership. Discovery follows the group's ref; a per-skill ref override only
 changes that skill's content. Explicit alias references remain selected even if
 the skill disappears from the wildcard membership.
 
+Use `exclude = ["legacy", "experimental"]` alongside `skills = "*"` to omit
+exact discovered names. Names are case-sensitive; patterns are not supported.
+An empty array is allowed, and names not yet present in the repository stay
+excluded if they appear later. Exclusions are only valid with wildcard selection.
+Explicit `[skills]` entries remain selected, including an alias reference to the
+same group; exclude a name to resolve a collision with another explicit source.
+
+`skl remove NAME` removes an explicit entry and adds the name to `exclude` in
+any wildcard group whose cached membership includes it. Removing a same-group
+explicit override also adds an exclusion, even before discovery. This prevents
+the wildcard from immediately restoring the skill. Run `sync` first to remove a
+wildcard member that has never been discovered. All requested removals are
+validated before the manifest is written; comments and dotfile symlinks survive.
+Remove the exclusion manually to select the skill again.
+
 The lock records complete wildcard membership, including an empty repository.
 `sync --locked` uses that snapshot without contacting the remote for discovery;
-a populated store needs no network. A fresh machine may still fetch pinned
-content. Missing coverage, changed source/ref, and changing/removing a wildcard
+a populated store needs no network. Exclusions filter this complete snapshot,
+without discarding discovery coverage. An exclusion change that adds or removes
+a skill lock entry requires an ordinary sync first; `--locked` never rewrites
+the lock. A fresh machine may still fetch pinned content. Missing coverage, changed source/ref, and changing/removing a wildcard
 declaration require an ordinary sync first. Disabled groups retain their lock
 and cached content across profiles and operating systems. Read-only commands use
 the cached membership and report missing or stale coverage.

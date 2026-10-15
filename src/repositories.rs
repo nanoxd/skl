@@ -13,6 +13,7 @@ use crate::paths::Paths;
 pub struct Repository {
     defaults: Table,
     overrides: BTreeSet<String>,
+    excluded: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -55,12 +56,31 @@ pub fn parse(
             bail!("repository `{alias}` must be a table")
         };
         let selection = defaults.remove("skills");
+        let exclusions = defaults.remove("exclude");
+        if exclusions.is_some() && selection != Some(Value::String("*".into())) {
+            bail!("repository `{alias}` exclude requires skills = \"*\"");
+        }
+        let excluded = match exclusions {
+            None => BTreeSet::new(),
+            Some(Value::Array(values)) => {
+                let mut names = BTreeSet::new();
+                for value in values {
+                    let Value::String(name) = value else {
+                        bail!("repository `{alias}` exclude must contain names")
+                    };
+                    manifest::validate_name(&name)?;
+                    names.insert(name);
+                }
+                names
+            }
+            Some(_) => bail!("repository `{alias}` exclude must be an array of names"),
+        };
         if defaults
             .keys()
             .any(|k| !matches!(k.as_str(), "source" | "ref" | "agents" | "profiles" | "os"))
         {
             bail!(
-                "repository `{alias}` only supports source, ref, skills, agents, profiles, and os"
+                "repository `{alias}` only supports source, ref, skills, exclude, agents, profiles, and os"
             );
         }
         let skill = manifest::parse_skill(&alias, Value::Table(defaults.clone()), agents, paths)?;
@@ -91,6 +111,7 @@ pub fn parse(
             Repository {
                 defaults,
                 overrides: BTreeSet::new(),
+                excluded,
             },
         );
     }
@@ -196,7 +217,7 @@ pub fn append(
             continue;
         };
         for (name, subdir) in &coverage.members {
-            if group.overrides.contains(name) {
+            if group.overrides.contains(name) || group.excluded.contains(name) {
                 continue;
             }
             if manifest.skills.iter().any(|skill| skill.name == *name) {
@@ -233,4 +254,56 @@ pub fn pending(
         }
     }
     Ok(pending)
+}
+
+/// Remove wildcard-derived skills without allowing discovery to add them back.
+/// Coverage stays complete; exclusions only filter the expanded manifest.
+pub fn exclude_removed(
+    paths: &Paths,
+    doc: &mut toml_edit::DocumentMut,
+    coverage: &BTreeMap<String, Coverage>,
+    names: &[String],
+) -> Result<()> {
+    let manifest = manifest::parse(&doc.to_string(), paths)?;
+    for name in names {
+        manifest::validate_name(name)?;
+        let direct = doc.get("skills").and_then(|v| v.get(name));
+        let override_alias = direct
+            .and_then(|v| v.get("repository"))
+            .and_then(toml_edit::Item::as_str);
+        let aliases: Vec<_> = manifest
+            .repositories
+            .iter()
+            .filter_map(|(alias, group)| {
+                let member = coverage
+                    .get(alias)
+                    .is_some_and(|c| c.members.contains_key(name));
+                ((member && !group.excluded.contains(name)) || override_alias == Some(alias))
+                    .then(|| alias.clone())
+            })
+            .collect();
+        if direct.is_none() && aliases.is_empty() {
+            bail!("`{name}` isn't in the manifest; wildcard members require a previous `skl sync`");
+        }
+        if let Some(skills) = doc
+            .get_mut("skills")
+            .and_then(toml_edit::Item::as_table_like_mut)
+        {
+            skills.remove(name);
+        }
+        for alias in aliases {
+            let group = &mut doc["repositories"][&alias];
+            if group.get("exclude").is_none() {
+                group["exclude"] = toml_edit::value(toml_edit::Array::new());
+            }
+            let excluded = group["exclude"]
+                .as_array_mut()
+                .context("exclude must be an array")?;
+            if !excluded.iter().any(|value| value.as_str() == Some(name)) {
+                excluded.push(name.as_str());
+            }
+        }
+    }
+    manifest::parse(&doc.to_string(), paths)?;
+    Ok(())
 }
