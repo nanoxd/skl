@@ -1693,3 +1693,178 @@ fn saved_update_plan_rejects_changed_resolved_agent_destinations() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("stale"));
 }
+
+#[test]
+fn info_is_read_only_and_explains_filters_and_missing_content() {
+    let env = Env::new();
+    let other_os = if cfg!(target_os = "macos") {
+        "linux"
+    } else {
+        "macos"
+    };
+    env.write_manifest(&format!(
+        "[skills]\nnotes = {{ path = '~/notes', profiles = ['work'], os = ['{other_os}'] }}\n"
+    ));
+    let before = fs::read(env.config("skills.toml")).unwrap();
+    let out = env.ok(&["info", "notes"]);
+    assert!(out.contains("Origin: local"));
+    assert!(out.contains("missing SKILL.md"));
+    assert!(out.contains("Selection: excluded: OS"));
+    assert!(out.contains("active profiles do not match [work]"));
+    assert!(out.contains("~/.claude/skills/notes — missing"));
+    assert!(!env.home.join(".local").exists());
+    assert!(!env.config("skills.lock").exists());
+    assert_eq!(fs::read(env.config("skills.toml")).unwrap(), before);
+    let out = env.ok(&["--profile", "work", "info", "notes"]);
+    assert!(out.contains("Active profiles: work (--profile)"));
+    assert!(!out.contains("active profiles do not match"));
+}
+
+#[test]
+fn info_reports_git_pin_stale_lock_and_actual_ownership() {
+    let env = Env::new();
+    let source = env.repo("info", &[("nested/notes", "notes")]);
+    env.write_manifest(&format!("[skills]\nnotes = '{source}'\n"));
+    env.ok(&["sync"]);
+    let out = env.ok(&["info", "notes"]);
+    assert!(out.contains("Pinned commit:"));
+    assert!(out.contains("Pinned subdirectory: nested/notes"));
+    assert!(out.contains("Lock: matches manifest"));
+    assert!(out.contains("installed (owned)"));
+    let original = fs::read_link(env.claude("notes")).unwrap();
+    fs::remove_file(env.claude("notes")).unwrap();
+    let other = env.home.join("other");
+    write_skill(&other, "notes", "user");
+    std::os::unix::fs::symlink(&other, env.claude("notes")).unwrap();
+    let out = env.ok(&["info", "notes"]);
+    assert!(out.contains("~/.claude/skills/notes — unmanaged"));
+    assert!(out.contains("Recorded target:"));
+    assert_eq!(fs::read_link(env.claude("notes")).unwrap(), other);
+    env.write_manifest(&format!(
+        "[skills]\nnotes = {{ source = '{source}', ref = 'changed' }}\n"
+    ));
+    assert!(env.ok(&["info", "notes"]).contains("Lock: stale"));
+    assert!(original.exists());
+}
+
+#[test]
+fn info_handles_unmanaged_unknown_and_unexported_xcode() {
+    let env = Env::new();
+    write_skill(&env.claude("external"), "external", "user");
+    let out = env.ok(&["info", "external"]);
+    assert!(out.contains("Origin: unmanaged"));
+    assert!(out.contains("Selection: not in manifest"));
+    assert!(!env.home.join(".local").exists());
+    assert!(env.fails(&["info", "unknown"]).contains("unknown skill"));
+    assert!(
+        env.fails(&["info", "../external"])
+            .contains("not a valid skill name")
+    );
+    env.write_manifest("[xcode]\nskills = ['apple']\n");
+    let out = env.ok(&["info", "apple"]);
+    assert!(out.contains("Origin: Xcode"));
+    assert!(out.contains("Xcode: not exported"));
+    assert!(!env.home.join(".local").exists());
+}
+
+#[test]
+fn info_without_lock_does_not_fetch_and_rejects_corrupt_metadata() {
+    let env = Env::new();
+    env.write_manifest("[skills]\nnotes = 'nonexistent/never-fetch'\n");
+    assert!(env.ok(&["info", "notes"]).contains("Lock: not locked"));
+    assert!(!env.home.join(".local").exists());
+    fs::write(env.config("skills.lock"), "not toml!").unwrap();
+    assert!(env.fails(&["info", "notes"]).contains("invalid lockfile"));
+}
+
+#[test]
+fn info_distinguishes_owned_wrong_target_broken_and_user_store_links() {
+    let env = Env::new();
+    let old = env.home.join("old");
+    let new = env.home.join("new");
+    write_skill(&old, "notes", "old");
+    write_skill(&new, "notes", "new");
+    env.write_manifest("[skills]\nnotes = { path = '~/old' }\n");
+    env.ok(&["sync"]);
+    env.write_manifest("[skills]\nnotes = { path = '~/new' }\n");
+    assert!(
+        env.ok(&["info", "notes"])
+            .contains("different target (owned)")
+    );
+    fs::remove_file(old.join("SKILL.md")).unwrap();
+    assert!(env.ok(&["info", "notes"]).contains("broken (owned)"));
+    fs::remove_file(env.home.join(".local/share/skl/state.toml")).unwrap();
+    assert!(env.ok(&["info", "notes"]).contains("unmanaged"));
+}
+
+#[test]
+fn info_reports_cached_xcode_provenance_without_export() {
+    let env = Env::new();
+    env.write_manifest("[xcode]\nskills = '*'\n");
+    let digest = "a".repeat(64);
+    fs::write(env.config("skills.lock"), format!("version = 1\nxcode_all_complete = true\n[xcode.apple]\nversion = 'Xcode 27 build TEST'\ndigest = '{digest}'\n")).unwrap();
+    let out = env.ok(&["info", "apple"]);
+    assert!(out.contains("Xcode version: Xcode 27 build TEST"));
+    assert!(out.contains(&format!("Content digest: {digest}")));
+    assert!(out.contains("missing SKILL.md"));
+    assert!(!env.home.join(".local").exists());
+}
+
+#[test]
+fn info_reports_local_source_in_agent_directory_as_direct() {
+    let env = Env::new();
+    write_skill(&env.codex("notes"), "notes", "local");
+    env.write_manifest(
+        "agents = ['codex']\n[skills]\nnotes = { path = '~/.agents/skills/notes' }\n",
+    );
+    env.ok(&["sync"]);
+    let out = env.ok(&["info", "notes"]);
+    assert!(out.contains("~/.agents/skills/notes — local source (direct)"));
+    assert!(!out.contains("conflict"));
+}
+
+#[test]
+fn info_accepts_local_skill_document_symlinks() {
+    let env = Env::new();
+    let source = env.home.join("notes");
+    write_skill(&source, "notes", "local");
+    fs::rename(source.join("SKILL.md"), source.join("definition.md")).unwrap();
+    std::os::unix::fs::symlink("definition.md", source.join("SKILL.md")).unwrap();
+    env.write_manifest("[skills]\nnotes = { path = '~/notes' }\n");
+    env.ok(&["sync"]);
+    let out = env.ok(&["info", "notes"]);
+    assert!(out.contains("Content: ~/notes (available)"));
+    assert!(out.contains("~/.claude/skills/notes — installed (owned)"));
+    assert!(out.contains("~/.agents/skills/notes — installed (owned)"));
+    assert!(!out.contains("broken"));
+}
+
+#[test]
+fn info_matching_unowned_links_are_not_conflicts() {
+    let env = Env::new();
+    let source = env.home.join("notes");
+    write_skill(&source, "notes", "local");
+    fs::create_dir_all(env.claude("notes").parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&source, env.claude("notes")).unwrap();
+    env.write_manifest("[skills]\nnotes = { path = '~/notes' }\n");
+    env.ok(&["sync"]);
+    let out = env.ok(&["info", "notes"]);
+    assert!(out.contains("~/.claude/skills/notes — unmanaged"));
+    assert!(!out.contains("conflict"));
+    assert!(out.contains("~/.agents/skills/notes — installed (owned)"));
+    assert_eq!(fs::read_link(env.claude("notes")).unwrap(), source);
+}
+
+#[test]
+fn info_rejects_symlinked_skill_documents_in_git_store() {
+    let env = Env::new();
+    let source = env.repo("info-store", &[("notes", "notes")]);
+    env.write_manifest(&format!("[skills]\nnotes = '{source}'\n"));
+    env.ok(&["sync"]);
+    let content = fs::read_link(env.claude("notes")).unwrap();
+    fs::rename(content.join("SKILL.md"), content.join("definition.md")).unwrap();
+    std::os::unix::fs::symlink("definition.md", content.join("SKILL.md")).unwrap();
+    let out = env.ok(&["info", "notes"]);
+    assert!(out.contains("missing SKILL.md"));
+    assert!(out.contains("broken (owned)"));
+}

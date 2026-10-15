@@ -593,7 +593,7 @@ fn locate(
 
 /// Flattens a repo subdirectory into one store directory name, so a skill nested inside
 /// another skill's directory never shares files with it. `@root` is the repo root.
-fn store_name(subdir: &str) -> String {
+pub(crate) fn store_name(subdir: &str) -> String {
     if subdir.is_empty() {
         return "@root".into();
     }

@@ -1,5 +1,6 @@
 mod agents;
 mod git;
+mod info;
 mod lock;
 mod manifest;
 mod paths;
@@ -101,6 +102,8 @@ enum Command {
     /// Show each skill, its locked commit and whether its links are in place, then
     /// anything in the agents' skill directories that skl doesn't manage
     List,
+    /// Inspect one skill without changing files or contacting its source
+    Info { name: String },
     /// Show or configure the manifest's default agent harnesses
     Agents {
         #[command(subcommand)]
@@ -158,6 +161,7 @@ fn run(cli: Cli) -> Result<bool> {
         | Command::Update { dry_run: true, .. }
         | Command::Sync { dry_run: true, .. }
         | Command::List
+        | Command::Info { .. }
         | Command::Agents {
             action: None | Some(AgentAction::List),
         } => None,
@@ -219,6 +223,10 @@ fn run(cli: Cli) -> Result<bool> {
             sync::run(&paths, &active()?, &sync::Options::default())
         }
         Command::List => list(&paths, &active()?),
+        Command::Info { name } => {
+            info::collect(&paths, &active()?, &name)?.print(&paths);
+            Ok(true)
+        }
         Command::Agents { action } => configure_agents(&paths, action),
         Command::Profile { action } => {
             let changed = action.is_some();
