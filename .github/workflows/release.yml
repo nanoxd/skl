@@ -58,28 +58,17 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7
-      - name: Extract changelog entry
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+      - name: Prepare changelog and release notes
         env:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          awk -v version="${TAG#v}" '
-            /^## / {
-              if (found) exit
-              if ($2 == "[" version "]") found = 1
-              next
-            }
-            found {
-              print
-              if ($0 ~ /[^[:space:]]/) content = 1
-            }
-            END {
-              if (!content) {
-                print "Missing or empty changelog entry for " version > "/dev/stderr"
-                exit 1
-              }
-            }
-          ' CHANGELOG.md > release-notes.md
+          cargo run --locked --example prepare_release -- "$TAG" "$(date -u +%F)"
       - uses: actions/download-artifact@v8
         with:
           path: dist
@@ -92,4 +81,36 @@ jobs:
         run: |
           set -euo pipefail
           ls -l dist
-          gh release create "$TAG" dist/* --title "$TAG" --notes-file release-notes.md --verify-tag
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release edit "$TAG" --notes-file release-notes.md
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --title "$TAG" --notes-file release-notes.md --verify-tag
+          fi
+      - name: Save changelog on the default branch
+        env:
+          TAG: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- CHANGELOG.md; then
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add CHANGELOG.md
+          git commit -m "docs: update changelog for $TAG"
+          CHANGELOG_COMMIT=$(git rev-parse HEAD)
+          git fetch origin "$DEFAULT_BRANCH"
+          git checkout -B release-changelog FETCH_HEAD
+          # A successful earlier run may already have saved this release.
+          if git show HEAD:CHANGELOG.md | awk -v version="[${TAG#v}]" '
+            /^## / && $2 == version { found = 1 }
+            END { exit !found }
+          '; then
+            exit 0
+          fi
+          # Apply only the changelog commit, preserving newer branch commits.
+          # Conflicts or concurrent pushes fail safely; never force-push.
+          git cherry-pick "$CHANGELOG_COMMIT"
+          git push origin "HEAD:refs/heads/$DEFAULT_BRANCH"

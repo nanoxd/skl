@@ -1307,3 +1307,109 @@ fn rejects_invalid_os_filters() {
         assert!(!env.remotes.join("called").exists());
     }
 }
+
+#[path = "../examples/prepare_release.rs"]
+mod release_changelog;
+
+#[test]
+fn release_promotes_unreleased_and_is_repeatable() {
+    let original = "# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n- A fix.\n\n## [0.1.0] - 2026-10-14\n\n- Initial release.\n";
+    let (updated, notes) = release_changelog::prepare(original, "v0.2.0", "2026-10-15").unwrap();
+    assert_eq!(notes, "### Fixed\n\n- A fix.\n");
+    assert_eq!(
+        updated,
+        original.replace(
+            "## [Unreleased]",
+            "## [Unreleased]\n\n## [0.2.0] - 2026-10-15"
+        )
+    );
+    assert_eq!(
+        release_changelog::prepare(&updated, "v0.2.0", "2026-10-16").unwrap(),
+        (updated, notes)
+    );
+}
+
+#[test]
+fn release_uses_exact_existing_version_without_consuming_unreleased() {
+    let original = "## [Unreleased]\n\n- Future.\n\n## [0.2.10]\n\n- Other.\n\n## [0.2.1] - 2026-10-14\n\n- Released.\n";
+    let (updated, notes) = release_changelog::prepare(original, "v0.2.1", "2026-10-15").unwrap();
+    assert_eq!(updated, original);
+    assert_eq!(notes, "- Released.\n");
+}
+
+#[test]
+fn release_rejects_missing_or_empty_notes() {
+    for original in [
+        "# Changelog\n",
+        "## [Unreleased]\n\n",
+        "## [Unreleased]\n\n### Fixed\n\n## [0.1.0]\n\n- Old.\n",
+        "## [Unreleased]\n\n- Future.\n\n## [0.2.0]\n",
+    ] {
+        assert!(release_changelog::prepare(original, "v0.2.0", "2026-10-15").is_err());
+    }
+}
+
+#[test]
+fn release_saves_to_advanced_branch_and_reruns_without_duplicate_commits() {
+    let tmp = TempDir::new().unwrap();
+    let remote = tmp.path().join("remote.git");
+    let checkout = tmp.path().join("checkout");
+    fs::create_dir(&remote).unwrap();
+    git(&remote, &["init", "--bare", "--initial-branch=main"]);
+    git(tmp.path(), &["clone", remote.to_str().unwrap(), "checkout"]);
+    let original = "# Changelog\n\n## [Unreleased]\n\n- A fix.\n";
+    fs::write(checkout.join("CHANGELOG.md"), original).unwrap();
+    let tagged = commit(&checkout, "release source");
+    git(&checkout, &["tag", "v0.2.0"]);
+    fs::write(checkout.join("new-work.txt"), "preserve this").unwrap();
+    commit(&checkout, "work after the tag");
+    git(&checkout, &["push", "origin", "main"]);
+
+    // Exercise the actual workflow's save commands against a disposable remote.
+    let workflow = include_str!("../.github/workflows/release.yml");
+    let save_step = workflow
+        .split("      - name: Save changelog on the default branch\n")
+        .nth(1)
+        .unwrap();
+    let script = save_step
+        .split("        run: |\n")
+        .nth(1)
+        .unwrap()
+        .lines()
+        .map(|line| line.strip_prefix("          ").unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut saved = String::new();
+    for date in ["2026-10-15", "2026-10-16"] {
+        git(&checkout, &["checkout", "--detach", &tagged]);
+        let (updated, _) = release_changelog::prepare(original, "v0.2.0", date).unwrap();
+        fs::write(checkout.join("CHANGELOG.md"), updated).unwrap();
+        let output = Command::new("bash")
+            .args(["-c", &script])
+            .current_dir(&checkout)
+            .env("HOME", tmp.path())
+            .env("TAG", "v0.2.0")
+            .env("DEFAULT_BRANCH", "main")
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "commit.gpgsign")
+            .env("GIT_CONFIG_VALUE_0", "false")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let head = git(&remote, &["rev-parse", "main"]);
+        if saved.is_empty() {
+            saved = head;
+        } else {
+            assert_eq!(head, saved);
+        }
+        assert_eq!(
+            fs::read_to_string(checkout.join("new-work.txt")).unwrap(),
+            "preserve this"
+        );
+        assert_eq!(git(&checkout, &["rev-parse", "v0.2.0"]), tagged);
+    }
+}
