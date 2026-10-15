@@ -57,6 +57,29 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
+      - name: Extract changelog entry
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          awk -v version="${TAG#v}" '
+            /^## / {
+              if (found) exit
+              if ($2 == "[" version "]") found = 1
+              next
+            }
+            found {
+              print
+              if ($0 ~ /[^[:space:]]/) content = 1
+            }
+            END {
+              if (!content) {
+                print "Missing or empty changelog entry for " version > "/dev/stderr"
+                exit 1
+              }
+            }
+          ' CHANGELOG.md > release-notes.md
       - uses: actions/download-artifact@v8
         with:
           path: dist
@@ -69,4 +92,4 @@ jobs:
         run: |
           set -euo pipefail
           ls -l dist
-          gh release create "$TAG" dist/* --title "$TAG" --generate-notes --verify-tag
+          gh release create "$TAG" dist/* --title "$TAG" --notes-file release-notes.md --verify-tag
