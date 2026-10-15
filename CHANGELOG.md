@@ -6,6 +6,9 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- `skl completions SHELL` generates shell completion scripts from the CLI definition
+  on stdout without requiring configuration or changing installation state.
+
 - In-repository Homebrew formula for checksum-verified macOS and Linux release
   binaries on ARM64 and x86_64, with installation and update instructions.
 - Automatic Homebrew formula updates after stable tag releases, with archive
