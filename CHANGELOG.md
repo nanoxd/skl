@@ -6,6 +6,11 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- Repository aliases and persistent skill collections, including wildcard
+  membership tracking and offline locked snapshots.
+- Explicit portable project scope with installation state isolated from global
+  skills and other projects.
+- Support for more agent harnesses and configurable default agents.
 - Local collection imports with `add DIRECTORY --all` or repeatable `--skill`,
   retaining live local paths and rejecting ambiguous selections before manifest edits.
 - Opt-in `add --interactive` numbered skill and agent selection, with terminal-only
