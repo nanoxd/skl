@@ -1,0 +1,48 @@
+name: Setup action
+
+on:
+  pull_request:
+    paths:
+      - .github/actions/setup-skl/**
+      - .github/workflows/setup-action.yml
+  push:
+    branches: [main]
+    paths:
+      - .github/actions/setup-skl/**
+      - .github/workflows/setup-action.yml
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    strategy:
+      fail-fast: false
+      matrix:
+        # v0.1.0 predates Linux ARM64 release assets. Add that runner after a
+        # release containing the ARM64 asset is available.
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-skl
+        id: setup
+        with:
+          version: v0.1.0
+      - name: Verify release and PATH
+        shell: bash
+        env:
+          SKL_SETUP_PATH: ${{ steps.setup.outputs.path }}
+        run: |
+          set -euo pipefail
+          test "$(command -v skl)" = "$SKL_SETUP_PATH/skl"
+          test "$(skl --version)" = 'skl 0.1.0'
+      - name: Reject an unpinned version
+        id: invalid
+        continue-on-error: true
+        uses: ./.github/actions/setup-skl
+        with:
+          version: latest
+      - name: Verify validation failure
+        if: steps.invalid.outcome != 'failure'
+        run: exit 1
