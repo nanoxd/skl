@@ -387,3 +387,22 @@ cargo install --git https://github.com/nanoxd/skl
 skl profile set personal
 skl sync
 ```
+
+## Releasing
+
+Keep release notes under `## [Unreleased]` in `CHANGELOG.md`. Push a `v*` tag
+(for example, `v0.2.0`) to build and publish a release. The release workflow
+moves those notes into `## [0.2.0] - YYYY-MM-DD` using the UTC release date,
+leaves an empty `[Unreleased]` section, and uses the entry as GitHub release notes.
+An existing entry for the exact version takes precedence. Missing or empty notes
+fail the release instead of publishing blank notes.
+
+After publishing, the workflow commits the changelog update to the repository's
+default branch. It applies only the changelog change from the tagged snapshot;
+the tag stays on its original commit. The Actions token must be allowed to push
+to that branch. Conflicting changelog edits or a concurrent push fail the save
+step without overwriting branch changes. Resolve any conflict and rerun the
+workflow; reruns update the existing release and skip already saved entries.
+Pull the automated commit before preparing the next release.
+
+This automates changelog headings, not the package version in `Cargo.toml`.

@@ -19,6 +19,9 @@ All notable changes to this project are documented here.
 
 ### Fixed
 
+- Automatically version unreleased changelog entries when a release tag is pushed
+  and save the updated changelog to the default branch.
+
 - Publish the matching changelog entry as the notes for each GitHub release.
 - Ignore relative `XDG_CONFIG_HOME` and `XDG_DATA_HOME` values and fall back to
   the default directories, as required by the XDG Base Directory Specification.
