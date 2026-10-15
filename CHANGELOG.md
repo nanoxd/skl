@@ -7,6 +7,9 @@ All notable changes to this project are documented here.
 ### Added
 
 - Saved Git update plans with `update --plan FILE` and `update --apply-plan FILE`: review full patches, install exact commits, and reject stale manifest, lock or machine context. Planning writes only a new plan file and does not support Xcode manifests.
+- Versioned JSON output for `skl list`, `skl info`, and `skl doctor`, including
+  selection, provenance, ownership, unmanaged entries, and structured errors.
+
 - Read-only `skl info <name>` shows source and pin provenance, effective profile/OS
   selection, content availability, and actual link ownership without fetching or
   exporting skills. It also inspects unmanaged entries in configured agent directories.
