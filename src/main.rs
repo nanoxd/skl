@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 use toml_edit::{DocumentMut, InlineTable, Item, Table, value};
 
 use crate::git::Git;
@@ -53,6 +53,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Generate shell completions on stdout without reading configuration
+    Completions {
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
     /// Search the skills.sh catalog without installing anything
     Search {
         #[arg(required = true, num_args = 1..)]
@@ -308,6 +313,10 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<bool> {
+    if let Command::Completions { shell } = &cli.command {
+        clap_complete::generate(*shell, &mut Cli::command(), "skl", &mut std::io::stdout());
+        return Ok(true);
+    }
     if let Command::Search {
         query,
         owner,
@@ -340,7 +349,9 @@ fn run(cli: Cli) -> Result<bool> {
     };
     let active = || Active::resolve(&paths, &cli.profiles);
     match cli.command {
-        Command::Search { .. } => unreachable!("search handled before resolving machine paths"),
+        Command::Search { .. } | Command::Completions { .. } => {
+            unreachable!("command handled before resolving machine paths")
+        }
         Command::Sync {
             dry_run,
             force,

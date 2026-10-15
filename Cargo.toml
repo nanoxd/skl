@@ -22,6 +22,7 @@ toml_edit = "0.25.17"
 
 sha2 = "0.10"
 tempfile = "3.27.0"
+clap_complete = "4.6.5"
 
 [profile.release]
 lto = true

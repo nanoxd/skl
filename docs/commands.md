@@ -82,3 +82,40 @@ inspected before export. Unmanaged entries can be inspected even without a manif
 `skl list` ends with a "Not managed by skl" section: every entry in each agent's
 skills directory that `skl` doesn't own, such as skills an app installed or leftovers
 from another tool, so you can see everything an agent will load.
+
+## Shell completions
+
+Generate completions from the installed CLI for Bash, Zsh, or Fish (Elvish and
+PowerShell are also supported). Generation writes only the script to stdout and
+requires no HOME, manifest, or installed skills. It completes commands, flags,
+and predefined argument choices; skill names and profiles are not queried.
+
+For Bash, load completions in the current shell:
+
+```sh
+source <(skl completions bash)
+```
+
+For Zsh, save the script in a directory on `fpath` before initializing completion:
+
+```sh
+mkdir -p ~/.zsh/completions
+skl completions zsh > ~/.zsh/completions/_skl
+```
+
+Add these lines to `~/.zshrc` (before any existing `compinit` call):
+
+```sh
+fpath=(~/.zsh/completions $fpath)
+autoload -Uz compinit
+compinit
+```
+
+For Fish, install its automatically loaded completion file:
+
+```sh
+mkdir -p ~/.config/fish/completions
+skl completions fish > ~/.config/fish/completions/skl.fish
+```
+
+Regenerate saved completion files after upgrading skl to pick up CLI changes.

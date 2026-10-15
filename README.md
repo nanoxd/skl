@@ -43,6 +43,9 @@ skl remove skill-creator    # Remove a managed skill
 For a team's repository, use `skl --project . add …` and commit the manifest and
 lockfile at the project root. Teammates run `skl --project . sync --locked`.
 
+Generate shell completions with `skl completions bash`, `skl completions zsh`, or
+`skl completions fish`. See [setup instructions](docs/commands.md#shell-completions).
+
 ## Documentation
 
 - [Getting started](docs/getting-started.md) — installation and dotfiles setup

@@ -3728,3 +3728,69 @@ fn homebrew_release_updates_all_archives_and_preserves_formula_test() {
     .unwrap();
     assert!(release_homebrew::update(original, "v99.0.0", tmp.path()).is_err());
 }
+
+#[test]
+fn completions_are_generated_without_configuration_or_side_effects() {
+    let env = Env::new();
+    // These inputs would fail path/config resolution if generation reached it.
+    fs::create_dir_all(env.home.join(".config/skl")).unwrap();
+    fs::write(env.home.join(".config/skl/skills.toml"), "invalid = [").unwrap();
+    for (shell, marker) in [
+        ("bash", "complete -F _skl"),
+        ("zsh", "#compdef skl"),
+        ("fish", "complete -c skl"),
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_skl"))
+            .args([
+                "--project",
+                "/nonexistent/skl-completions-project",
+                "completions",
+                shell,
+            ])
+            .current_dir(&env.home)
+            .env_remove("HOME")
+            .env("SKL_CONFIG_DIR", env.home.join(".config/skl"))
+            .env("SKL_DATA_DIR", env.home.join("data"))
+            .env("SKL_PROFILE", "invalid/profile")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.stderr.is_empty());
+        let script = String::from_utf8(out.stdout).unwrap();
+        assert!(
+            script.contains(marker),
+            "missing {shell} header/registration"
+        );
+        for flag in ["dry-run", "locked", "only-profile"] {
+            assert!(
+                script.contains(flag),
+                "missing {flag} in {shell} completions"
+            );
+        }
+        assert!(script.contains("configure"));
+        assert!(script.contains("sync"));
+        assert!(!env.home.join("data").exists());
+        assert!(!env.home.join("skills.toml").exists());
+    }
+    assert_eq!(
+        fs::read_to_string(env.home.join(".config/skl/skills.toml")).unwrap(),
+        "invalid = ["
+    );
+}
+
+#[test]
+fn completions_require_a_supported_shell() {
+    let env = Env::new();
+    for args in [vec!["completions"], vec!["completions", "unsupported"]] {
+        let out = env.skl(&args);
+        assert!(!out.status.success());
+        assert!(out.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("<SHELL>"));
+    }
+    assert!(!env.home.join(".local").exists());
+    assert!(!env.home.join(".config").exists());
+}
