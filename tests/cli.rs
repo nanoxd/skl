@@ -2367,3 +2367,220 @@ fn discover_handles_missing_and_quoted_descriptions_without_changing_names() {
     assert!(out.contains("quoted\tquoted\tA \"quote\" and tab text\n"));
     assert!(out.contains("missing\tmissing\t\n"));
 }
+
+#[test]
+fn add_skill_options_and_existing_entry_are_preserved() {
+    let env = Env::new();
+    let url = env.repo("options", &[(".", "example")]);
+    env.ok(&[
+        "add",
+        &url,
+        "--agent",
+        "codex",
+        "--agent",
+        "codex",
+        "--agent",
+        "~/custom/skills",
+        "--os",
+        "linux",
+        "--os",
+        "macos",
+        "--only-profile",
+        "work",
+        "--no-sync",
+    ]);
+    let text = fs::read_to_string(env.config("skills.toml")).unwrap();
+    let doc: toml::Value = toml::from_str(&text).unwrap();
+    let skill = &doc["skills"]["example"];
+    assert_eq!(skill["source"].as_str(), Some(url.as_str()));
+    assert_eq!(skill["agents"].as_array().unwrap().len(), 2);
+    assert_eq!(skill["os"].as_array().unwrap().len(), 2);
+    assert_eq!(skill["profiles"][0].as_str(), Some("work"));
+    env.ok(&["add", &url, "--agent", "claude-code", "--no-sync"]);
+    assert_eq!(fs::read_to_string(env.config("skills.toml")).unwrap(), text);
+    assert!(!env.config("skills.lock").exists());
+}
+
+#[test]
+fn configure_batch_preserves_source_fields_comments_and_symlink() {
+    let env = Env::new();
+    let original = "# settings\n[skills]\nshort = 'owner/repo' # keep shorthand comment\ninline = { source = 'owner/repo', ref = 'v1', subdir = 'skills/x', os = ['macos'] } # inline comment\n\n[skills.local]\n# local directory\npath = '~/missing'\nagents = ['codex'] # agent comment\n";
+    env.write_manifest(original);
+    let target = env.home.join("dotfiles.toml");
+    fs::rename(env.config("skills.toml"), &target).unwrap();
+    std::os::unix::fs::symlink(&target, env.config("skills.toml")).unwrap();
+    env.ok(&[
+        "configure",
+        "short",
+        "inline",
+        "local",
+        "--agent",
+        "cursor",
+        "--only-profile",
+        "work",
+        "--no-sync",
+    ]);
+    let text = fs::read_to_string(&target).unwrap();
+    for comment in [
+        "# settings",
+        "# keep shorthand comment",
+        "# inline comment",
+        "# local directory",
+        "# agent comment",
+    ] {
+        assert!(text.contains(comment), "missing {comment}: {text}");
+    }
+    let doc: toml::Value = toml::from_str(&text).unwrap();
+    assert_eq!(doc["skills"]["inline"]["ref"].as_str(), Some("v1"));
+    assert_eq!(doc["skills"]["inline"]["subdir"].as_str(), Some("skills/x"));
+    assert_eq!(doc["skills"]["inline"]["os"][0].as_str(), Some("macos"));
+    assert_eq!(doc["skills"]["local"]["path"].as_str(), Some("~/missing"));
+    for name in ["short", "inline", "local"] {
+        assert_eq!(doc["skills"][name]["agents"][0].as_str(), Some("cursor"));
+        assert_eq!(doc["skills"][name]["profiles"][0].as_str(), Some("work"));
+    }
+    assert!(
+        fs::symlink_metadata(env.config("skills.toml"))
+            .unwrap()
+            .is_symlink()
+    );
+    assert!(!env.home.join(".local/share/skl/repos").exists());
+}
+
+#[test]
+fn configure_resets_remove_overrides_without_expanding_shorthand() {
+    let env = Env::new();
+    env.write_manifest("[skills]\nshort = 'owner/repo' # unchanged\ninline = { source = 'owner/repo', agents = ['codex'], os = ['linux'], profiles = ['work'] }\n[skills.normal]\npath = '~/missing'\nagents = ['codex']\nos = ['linux']\nprofiles = ['work']\n");
+    env.ok(&[
+        "configure",
+        "short",
+        "inline",
+        "normal",
+        "--default-agents",
+        "--all-os",
+        "--all-profiles",
+        "--no-sync",
+    ]);
+    let text = fs::read_to_string(env.config("skills.toml")).unwrap();
+    assert!(text.contains("short = 'owner/repo' # unchanged"));
+    let doc: toml::Value = toml::from_str(&text).unwrap();
+    for name in ["inline", "normal"] {
+        let skill = doc["skills"][name].as_table().unwrap();
+        assert!(!skill.contains_key("agents"));
+        assert!(!skill.contains_key("os"));
+        assert!(!skill.contains_key("profiles"));
+    }
+}
+
+#[test]
+fn configure_invalid_edits_are_atomic() {
+    let env = Env::new();
+    let original = "[skills]\nx = 'owner/repo'\n";
+    env.write_manifest(original);
+    for args in [
+        vec!["configure", "x", "missing", "--agent", "codex", "--no-sync"],
+        vec!["configure", "x", "--agent", "unknown-harness", "--no-sync"],
+        vec!["configure", "x", "--agent", "relative/path", "--no-sync"],
+        vec![
+            "configure",
+            "x",
+            "--only-profile",
+            "bad/profile",
+            "--no-sync",
+        ],
+        vec!["configure", "x", "--os", "windows", "--no-sync"],
+        vec![
+            "configure",
+            "x",
+            "--agent",
+            "codex",
+            "--default-agents",
+            "--no-sync",
+        ],
+        vec!["configure", "x", "--os", "linux", "--all-os", "--no-sync"],
+        vec![
+            "configure",
+            "x",
+            "--only-profile",
+            "work",
+            "--all-profiles",
+            "--no-sync",
+        ],
+    ] {
+        env.fails(&args);
+        assert_eq!(
+            fs::read_to_string(env.config("skills.toml")).unwrap(),
+            original
+        );
+    }
+    let invalid = "[skills]\nx = 'owner/repo'\ny = {path = '~/missing', bogus = true}\n";
+    env.write_manifest(invalid);
+    env.fails(&["configure", "x", "--agent", "codex", "--no-sync"]);
+    assert_eq!(
+        fs::read_to_string(env.config("skills.toml")).unwrap(),
+        invalid
+    );
+}
+
+#[test]
+fn configure_sync_uses_global_profile_and_reconciles_links() {
+    let env = Env::new();
+    write_skill(&env.home.join("local"), "example", "v1");
+    env.ok(&[
+        "add",
+        "./local",
+        "--agent",
+        "codex",
+        "--only-profile",
+        "work",
+        "--profile",
+        "work",
+    ]);
+    assert!(env.codex("example").is_symlink());
+    assert!(!env.claude("example").exists());
+    env.ok(&[
+        "configure",
+        "example",
+        "--default-agents",
+        "--profile",
+        "work",
+    ]);
+    assert!(env.claude("example").is_symlink());
+    env.ok(&[
+        "configure",
+        "example",
+        "--only-profile",
+        "personal",
+        "--profile",
+        "work",
+    ]);
+    assert!(!env.codex("example").exists());
+    assert!(!env.claude("example").exists());
+}
+
+#[test]
+fn add_invalid_options_or_manifest_leave_manifest_unchanged() {
+    let env = Env::new();
+    write_skill(&env.home.join("local"), "example", "v1");
+    let original = "[skills]\nx = 'owner/repo'\n";
+    env.write_manifest(original);
+    env.fails(&["add", "./local", "--agent", "unknown-harness", "--no-sync"]);
+    env.fails(&[
+        "add",
+        "./local",
+        "--only-profile",
+        "bad/profile",
+        "--no-sync",
+    ]);
+    assert_eq!(
+        fs::read_to_string(env.config("skills.toml")).unwrap(),
+        original
+    );
+    let invalid = "[skills]\nx = {source = 'owner/repo', invalid = true}\n";
+    env.write_manifest(invalid);
+    env.fails(&["add", "./local", "--no-sync"]);
+    assert_eq!(
+        fs::read_to_string(env.config("skills.toml")).unwrap(),
+        invalid
+    );
+}
