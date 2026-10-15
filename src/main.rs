@@ -1,4 +1,5 @@
 mod agents;
+mod doctor;
 mod git;
 mod info;
 mod lock;
@@ -104,6 +105,8 @@ enum Command {
     List,
     /// Inspect one skill without changing files or contacting its source
     Info { name: String },
+    /// Diagnose local installation problems without changing files or using the network
+    Doctor,
     /// Show or configure the manifest's default agent harnesses
     Agents {
         #[command(subcommand)]
@@ -162,6 +165,7 @@ fn run(cli: Cli) -> Result<bool> {
         | Command::Sync { dry_run: true, .. }
         | Command::List
         | Command::Info { .. }
+        | Command::Doctor
         | Command::Agents {
             action: None | Some(AgentAction::List),
         } => None,
@@ -227,6 +231,7 @@ fn run(cli: Cli) -> Result<bool> {
             info::collect(&paths, &active()?, &name)?.print(&paths);
             Ok(true)
         }
+        Command::Doctor => doctor::run(&paths, &active()?),
         Command::Agents { action } => configure_agents(&paths, action),
         Command::Profile { action } => {
             let changed = action.is_some();

@@ -10,6 +10,8 @@ All notable changes to this project are documented here.
 - Read-only `skl info <name>` shows source and pin provenance, effective profile/OS
   selection, content availability, and actual link ownership without fetching or
   exporting skills. It also inspects unmanaged entries in configured agent directories.
+- Read-only `skl doctor` diagnostics for local installation health, link ownership,
+  cached skills, configuration errors, and missing tools, with actionable remedies.
 
 - Xcode skill imports through `xcrun agent skills export`: configure `[xcode]`
   with `skills = "*"` or selected names, plus optional agents and profiles.
