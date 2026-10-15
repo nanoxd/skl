@@ -706,3 +706,30 @@ path. To override either, use the repository URL with `--ref` and `--subdir`.
 Tree URLs with percent escapes, fragments, or query strings are rejected with
 instructions to use those flags. Ordinary git URLs, SSH credentials and private
 repository authentication continue to pass through to git unchanged.
+
+### Interactive installation
+
+Use `skl add owner/repo --interactive` to choose skills and agent destinations
+with numbered prompts. Enter comma-separated numbers or `all`; enter `q`, an
+empty line, or end-of-input to cancel. Invalid selections stop the command.
+Cancellation and invalid input do not write the manifest, links, or shared state.
+Skill discovery uses disposable storage while you choose; skl acquires its write
+lock and revalidates the selection before editing the manifest.
+
+Explicit `--skill`, `@skill`, or `--all` skips the skill prompt. Explicit `--agent`
+skips the agent prompt. Local directories use the same collection discovery as
+`add --all`; selecting a nested skill keeps its frontmatter name and exact path,
+even when the collection root also contains a skill.
+Selected agents become per-skill overrides; existing manifest entries retain their
+settings, as with ordinary `add`. Without `--interactive`, behavior remains
+noninteractive. The flag requires both stdin and stderr to be terminals; use
+explicit flags in scripts.
+
+`skl agents detect` reports recognizable harness configuration directories without
+changing files. The interactive agent list marks these hints, but still lets you
+choose any known harness. A configuration directory does not prove an agent is
+installed, and shared directories such as `~/.agents/skills` do not identify all
+the harnesses that might read them. Detection never changes your default agents. With `--project`, detection examines
+that project instead of your home directory, and selection includes project-only
+harnesses such as Eve. Shared project skill directories do not identify individual
+harnesses either.

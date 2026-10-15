@@ -8,6 +8,9 @@ All notable changes to this project are documented here.
 
 - Local collection imports with `add DIRECTORY --all` or repeatable `--skill`,
   retaining live local paths and rejecting ambiguous selections before manifest edits.
+- Opt-in `add --interactive` numbered skill and agent selection, with terminal-only
+  prompts and cancellation before writes, plus read-only `agents detect` hints.
+
 - GitHub/GitLab tree URLs and `owner/repo@skill` source shortcuts for `add` and
   `discover`, plus `add --subdir` for exact skill selection, including hidden
   directories and the repository root. Ambiguous slash refs require `--ref`.

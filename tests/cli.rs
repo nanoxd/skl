@@ -3234,3 +3234,194 @@ fn search_rejects_invalid_options_before_network_and_reports_connection_failure(
             .contains("search request failed")
     );
 }
+
+#[test]
+fn interactive_requires_tty_before_any_write_or_fetch() {
+    let env = Env::new();
+    let error = env.fails(&["add", "invalid/repo", "--interactive"]);
+    assert!(error.contains("requires terminal"));
+    assert!(!env.config("skills.toml").exists());
+    assert!(!env.home.join(".local/share/skl").exists());
+}
+
+#[test]
+fn agent_detection_is_read_only_and_ignores_shared_skill_directories() {
+    let env = Env::new();
+    fs::create_dir_all(env.home.join(".agents/skills")).unwrap();
+    fs::create_dir_all(env.home.join(".config/agents/skills")).unwrap();
+    assert!(env.ok(&["agents", "detect"]).contains("No recognized"));
+    fs::create_dir_all(env.home.join(".codex")).unwrap();
+    fs::create_dir_all(env.home.join(".claude")).unwrap();
+    let found = env.ok(&["agents", "detect"]);
+    assert!(found.contains("codex"));
+    assert!(found.contains("claude-code"));
+    assert!(!found.contains("cline"));
+    assert!(!env.home.join(".local/share/skl").exists());
+    assert!(!env.config("skills.toml").exists());
+}
+
+fn interactive_pty(env: &Env, args: &[&str], input: &[u8]) -> (std::process::ExitStatus, String) {
+    use std::io::{Read, Write};
+    use std::os::fd::FromRawFd;
+    use std::process::Stdio;
+    let (mut master_fd, mut slave_fd) = (-1, -1);
+    assert_eq!(
+        unsafe {
+            libc::openpty(
+                &mut master_fd,
+                &mut slave_fd,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        },
+        0
+    );
+    let mut master = unsafe { fs::File::from_raw_fd(master_fd) };
+    let slave = unsafe { fs::File::from_raw_fd(slave_fd) };
+    let mut reader = master.try_clone().unwrap();
+    let output = std::thread::spawn(move || {
+        let mut result = Vec::new();
+        let mut buffer = [0; 1024];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(count) => result.extend_from_slice(&buffer[..count]),
+            }
+        }
+        String::from_utf8_lossy(&result).into_owned()
+    });
+    let mut child = Command::new(env!("CARGO_BIN_EXE_skl"))
+        .args(args)
+        .current_dir(&env.home)
+        .env("HOME", &env.home)
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("SKL_CONFIG_DIR")
+        .env_remove("SKL_DATA_DIR")
+        .env_remove("SKL_PROFILE")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::from(slave))
+        .spawn()
+        .unwrap();
+    master.write_all(input).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() > deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("interactive command timed out");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    drop(master);
+    (status, output.join().unwrap())
+}
+
+#[test]
+fn interactive_pty_selects_skills_and_agents_and_cancels_without_writes() {
+    for input in [b"q\n".as_slice(), b"1\nq\n", b"999\n", b"\x04"] {
+        let env = Env::new();
+        let url = env.repo("catalog", &[("one", "one"), ("two", "two")]);
+        let (status, output) = interactive_pty(&env, &["add", &url, "--interactive"], input);
+        assert!(!status.success(), "{output}");
+        assert!(!env.config("skills.toml").exists());
+        assert!(!env.home.join(".local/share/skl").exists());
+        assert!(!env.claude("one").exists());
+    }
+    let env = Env::new();
+    let url = env.repo("catalog", &[("one", "one"), ("two", "two")]);
+    // Choose the second skill and the first registry agent (adal).
+    let (status, output) = interactive_pty(&env, &["add", &url, "--interactive"], b"2\n1\n");
+    assert!(status.success(), "{output}");
+    assert!(env.home.join(".adal/skills/two").is_symlink());
+    assert!(!env.claude("two").exists());
+    assert!(!env.home.join(".adal/skills/one").exists());
+    let (status, output) = interactive_pty(
+        &env,
+        &[
+            "add",
+            &url,
+            "--interactive",
+            "--skill",
+            "one",
+            "--agent",
+            "codex",
+        ],
+        b"",
+    );
+    assert!(status.success(), "{output}");
+    assert!(!output.contains("Choose numbers"));
+    assert!(env.codex("one").is_symlink());
+}
+
+#[test]
+fn interactive_project_collection_selects_nested_skill_and_project_only_agent() {
+    let env = Env::new();
+    let project = env.home.join("project");
+    let sources = project.join("sources");
+    write_skill(&sources, "root-name", "root");
+    write_skill(
+        &sources.join("different-directory"),
+        "selected-name",
+        "nested",
+    );
+    let listing = env.ok(&["--project", project.to_str().unwrap(), "agents", "list"]);
+    let eve = listing
+        .lines()
+        .position(|line| line.starts_with("eve "))
+        .unwrap()
+        + 1;
+    let input = format!("2\n{eve}\n");
+    let (status, output) = interactive_pty(
+        &env,
+        &[
+            "--project",
+            project.to_str().unwrap(),
+            "add",
+            sources.to_str().unwrap(),
+            "--interactive",
+        ],
+        input.as_bytes(),
+    );
+    assert!(status.success(), "{output}");
+    let doc: toml::Table = fs::read_to_string(project.join("skills.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        doc["skills"]["selected-name"]["path"].as_str(),
+        Some("sources/different-directory")
+    );
+    assert!(doc["skills"].as_table().unwrap().get("root-name").is_none());
+    assert!(project.join("agent/skills/selected-name").is_symlink());
+    assert!(!project.join(".agents/skills/selected-name").exists());
+    assert!(!env.config("skills.toml").exists());
+    assert!(!env.claude("selected-name").exists());
+}
+
+#[test]
+fn project_agent_detection_does_not_infer_global_or_shared_harnesses() {
+    let env = Env::new();
+    let project = env.home.join("project");
+    fs::create_dir_all(project.join(".agents/skills")).unwrap();
+    fs::create_dir_all(env.home.join(".claude")).unwrap();
+    fs::create_dir_all(env.home.join(".codex")).unwrap();
+    let args = ["--project", project.to_str().unwrap(), "agents", "detect"];
+    assert!(env.ok(&args).contains("No recognized"));
+    fs::create_dir_all(project.join("agent")).unwrap();
+    fs::create_dir_all(project.join(".cursor")).unwrap();
+    let output = env.ok(&args);
+    assert!(output.contains("eve "));
+    assert!(output.contains("cursor "));
+    assert!(!output.contains("codex"));
+    assert!(!output.contains("claude-code"));
+    assert!(!output.contains("promptscript"));
+    assert!(!project.join("skills.toml").exists());
+    assert!(!env.home.join(".local/share/skl").exists());
+}

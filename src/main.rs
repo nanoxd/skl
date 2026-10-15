@@ -3,6 +3,7 @@ mod discover;
 mod doctor;
 mod git;
 mod info;
+mod interactive;
 mod json;
 mod lock;
 mod manifest;
@@ -103,6 +104,9 @@ enum Command {
     /// Add skills from a git repo (owner/repo or URL) or a local directory, then sync
     Add {
         source: String,
+        /// Choose skills and agents with numbered terminal prompts
+        #[arg(long)]
+        interactive: bool,
         #[command(flatten)]
         options: SkillOptions,
         /// Skill to add from a repository or local collection; repeatable
@@ -255,6 +259,8 @@ impl SkillOptions {
 enum AgentAction {
     /// List supported harnesses and their global skills directories
     List,
+    /// Show harnesses with recognizable configuration directories (read-only)
+    Detect,
     /// Replace the manifest's default agents (per-skill overrides still apply)
     Set {
         #[arg(required = true)]
@@ -323,8 +329,11 @@ fn run(cli: Cli) -> Result<bool> {
         | Command::Info { .. }
         | Command::Doctor { .. }
         | Command::Discover { .. }
+        | Command::Add {
+            interactive: true, ..
+        }
         | Command::Agents {
-            action: None | Some(AgentAction::List),
+            action: None | Some(AgentAction::List | AgentAction::Detect),
         } => None,
         _ => Some(lock_run(&paths)?),
     };
@@ -368,15 +377,24 @@ fn run(cli: Cli) -> Result<bool> {
         ),
         Command::Add {
             source,
-            options,
-            skills,
+            interactive,
+            mut options,
+            mut skills,
             all,
             git_ref,
             subdir,
             no_sync,
         } => {
             let source = source::Source::parse(&source, git_ref.as_deref(), subdir.as_deref())?;
-            add(&paths, &source, &skills, all, &options)?;
+            let mut selected_collection = false;
+            let _interactive_guard = if interactive {
+                selected_collection =
+                    interactive::select(&paths, &source, &mut skills, all, &mut options)?;
+                Some(lock_run(&paths)?)
+            } else {
+                None
+            };
+            add(&paths, &source, &skills, all, &options, selected_collection)?;
             if no_sync {
                 Ok(true)
             } else {
@@ -443,6 +461,20 @@ fn run(cli: Cli) -> Result<bool> {
 }
 
 fn configure_agents(paths: &Paths, action: Option<AgentAction>) -> Result<bool> {
+    if matches!(action, Some(AgentAction::Detect)) {
+        let detected = agents::detect(paths)?;
+        if detected.is_empty() {
+            println!("No recognized agent configuration directories found.");
+        }
+        for agent in detected {
+            println!(
+                "{:<20} {} (configuration found)",
+                agent.id,
+                paths.tilde(&agent.dir)
+            );
+        }
+        return Ok(true);
+    }
     if matches!(action, Some(AgentAction::List)) {
         for (id, _) in agents::known(paths) {
             let agent = agents::resolve(id, paths)?;
@@ -494,6 +526,8 @@ fn add(
     skills: &[String],
     all: bool,
     options: &SkillOptions,
+    // A picker-selected child must not become an alias for the root SKILL.md.
+    selected_collection: bool,
 ) -> Result<()> {
     options.validate(paths)?;
     let source = input.repository.as_str();
@@ -523,7 +557,11 @@ fn add(
         } else {
             std::path::absolute(&local)?
         };
-        let selected = if dir.join("SKILL.md").is_file() && !all && skills.len() <= 1 {
+        let selected = if dir.join("SKILL.md").is_file()
+            && !all
+            && skills.len() <= 1
+            && !selected_collection
+        {
             // Preserve the existing single-skill workflow, including --skill renaming.
             let text = fs::read_to_string(dir.join("SKILL.md"))
                 .with_context(|| format!("cannot read {}", paths.tilde(&dir.join("SKILL.md"))))?;
