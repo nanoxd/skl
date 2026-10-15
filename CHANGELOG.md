@@ -6,6 +6,9 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- Offline `verify [NAME ...] [--json]` for cached Git content and Xcode digests,
+  reporting drift and unavailable baselines without modifying installations.
+
 - Explicit `adopt NAME --from AGENT` snapshots unmanaged installed skills into
   portable local configuration, with dry-run and registration-only modes, source
   preservation, and ordinary sync conflict/backup handling.

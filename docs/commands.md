@@ -37,6 +37,8 @@ skl remove notes             # remove from the manifest and unlink
 
 skl info review              # provenance, selection rules, content and link ownership
 skl doctor                   # diagnose installation problems without changing files
+skl verify                   # check pinned cached content offline using existing Git cache
+skl verify review --json     # verify selected content with versioned JSON output
 skl list                     # skills, locked commits, missing links, unmanaged skills
 
 skl profile                  # show the active profiles and where they came from

@@ -4220,3 +4220,274 @@ fn adopt_allows_locally_excluded_cached_wildcard_member() {
             .is_symlink()
     );
 }
+
+/// Persistent bytes, types, symlink targets and permissions; don't follow links.
+fn verification_snapshot(root: &Path) -> Vec<(PathBuf, u32, Vec<u8>)> {
+    use std::os::unix::fs::PermissionsExt;
+    fn visit(root: &Path, path: &Path, out: &mut Vec<(PathBuf, u32, Vec<u8>)>) {
+        let metadata = fs::symlink_metadata(path).unwrap();
+        let bytes = if metadata.file_type().is_symlink() {
+            fs::read_link(path)
+                .unwrap()
+                .as_os_str()
+                .as_encoded_bytes()
+                .to_vec()
+        } else if metadata.is_file() {
+            fs::read(path).unwrap()
+        } else {
+            Vec::new()
+        };
+        out.push((
+            path.strip_prefix(root).unwrap().into(),
+            metadata.permissions().mode(),
+            bytes,
+        ));
+        if metadata.is_dir() {
+            for entry in fs::read_dir(path).unwrap() {
+                visit(root, &entry.unwrap().path(), out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    visit(root, root, &mut out);
+    out.sort();
+    out
+}
+
+#[test]
+fn verify_git_content_detects_resource_type_symlink_mode_and_membership_drift() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let e = Env::new();
+    let url = e.repo("verification", &[("notes", "notes")]);
+    let source = e.remote("verification").join("notes");
+    fs::write(source.join("resource.txt"), "original resource").unwrap();
+    fs::write(source.join("deleted.txt"), "delete me").unwrap();
+    fs::write(source.join("run"), "executable content").unwrap();
+    fs::set_permissions(source.join("run"), fs::Permissions::from_mode(0o755)).unwrap();
+    fs::create_dir(source.join("nested")).unwrap();
+    fs::write(source.join("nested/data"), "nested data").unwrap();
+    symlink("resource.txt", source.join("alias")).unwrap();
+    commit(&e.remote("verification"), "resources and types");
+    e.write_manifest(&format!("[skills]\nnotes = '{url}'\n"));
+    e.ok(&["sync"]);
+    fs::remove_dir_all(e.remote("verification")).unwrap();
+    let baseline = verification_snapshot(&e.home);
+    assert!(e.ok(&["verify"]).contains("verified: notes"));
+    assert_eq!(verification_snapshot(&e.home), baseline);
+    let target = fs::read_link(e.codex("notes")).unwrap();
+    fs::write(target.join("SKILL.md"), "altered skill").unwrap();
+    fs::write(target.join("resource.txt"), "altered resource").unwrap();
+    fs::remove_file(target.join("deleted.txt")).unwrap();
+    fs::write(target.join("added.txt"), "unexpected").unwrap();
+    fs::set_permissions(target.join("run"), fs::Permissions::from_mode(0o744)).unwrap();
+    fs::remove_file(target.join("alias")).unwrap();
+    symlink("added.txt", target.join("alias")).unwrap();
+    // Replacing a directory with an external symlink must compare the link itself.
+    fs::remove_dir_all(target.join("nested")).unwrap();
+    symlink("/a/nonexistent/external/directory", target.join("nested")).unwrap();
+    let before = verification_snapshot(&e.home);
+    let result = e.skl(&["verify", "notes", "--json"]);
+    assert!(!result.status.success());
+    assert!(result.stderr.is_empty());
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["command"], "verify");
+    assert_eq!(report["status"], "unhealthy");
+    assert_eq!(report["data"]["skills"][0]["status"], "drift");
+    let changes = report["data"]["skills"][0]["changes"].as_array().unwrap();
+    for (path, kind) in [
+        ("SKILL.md", "changed"),
+        ("resource.txt", "changed"),
+        ("deleted.txt", "deleted"),
+        ("added.txt", "added"),
+        ("run", "changed"),
+        ("alias", "changed"),
+        ("nested", "changed"),
+        ("nested/data", "deleted"),
+    ] {
+        assert!(
+            changes
+                .iter()
+                .any(|change| change["path"] == path && change["kind"] == kind),
+            "missing {path}: {report}"
+        );
+    }
+    assert_eq!(verification_snapshot(&e.home), before);
+}
+
+#[test]
+fn verify_reports_missing_offline_baselines_and_rejects_root_symlinks() {
+    use std::os::unix::fs::symlink;
+    let e = Env::new();
+    let url = e.repo("verification", &[("notes", "notes")]);
+    e.write_manifest(&format!("[skills]\nnotes = '{url}'\n"));
+    e.ok(&["sync"]);
+    let target = fs::read_link(e.codex("notes")).unwrap();
+    let moved = e.home.join("moved");
+    fs::rename(&target, &moved).unwrap();
+    symlink(&moved, &target).unwrap();
+    let before = verification_snapshot(&e.home);
+    let result = e.skl(&["verify"]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stdout).contains("symlink"));
+    assert_eq!(verification_snapshot(&e.home), before);
+    fs::remove_file(&target).unwrap();
+    fs::rename(&moved, &target).unwrap();
+    fs::remove_dir_all(e.home.join(".local/share/skl/repos")).unwrap();
+    fs::remove_dir_all(e.remote("verification")).unwrap();
+    let before = verification_snapshot(&e.home);
+    let result = e.skl(&["verify", "--json"]);
+    assert!(!result.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["data"]["skills"][0]["status"], "unavailable");
+    assert_eq!(report["diagnostics"][0]["code"], "baseline-unavailable");
+    assert_eq!(verification_snapshot(&e.home), before);
+}
+
+#[test]
+fn verify_skips_local_and_disabled_skills_and_reports_json_errors() {
+    let e = Env::new();
+    write_skill(&e.home.join("local"), "local", "unversioned");
+    e.write_manifest("[skills]\nlocal = { path = '~/local' }\ninactive = { source = 'file:///unavailable', profiles = ['work'] }\n");
+    let before = verification_snapshot(&e.home);
+    let output = e.ok(&["verify", "--json"]);
+    let report: serde_json::Value = serde_json::from_str(&output).unwrap();
+    let skills = report["data"]["skills"].as_array().unwrap();
+    assert_eq!(skills.len(), 2);
+    assert!(skills.iter().all(|s| s["status"] == "skipped"));
+    assert!(output.contains("no pinned content baseline"));
+    assert!(
+        !e.skl(&["--profile", "work", "verify", "inactive"])
+            .status
+            .success()
+    );
+    let result = e.skl(&["verify", "unknown", "--json"]);
+    assert!(!result.status.success());
+    assert!(result.stderr.is_empty());
+    let error: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(error["status"], "error");
+    assert_eq!(error["data"], serde_json::Value::Null);
+    assert_eq!(verification_snapshot(&e.home), before);
+}
+
+#[test]
+fn verify_respects_project_scope_and_selected_names() {
+    let e = Env::new();
+    let url = e.repo("verification", &[("a", "a"), ("b", "b")]);
+    let project = e.home.join("project");
+    fs::create_dir(&project).unwrap();
+    fs::write(
+        project.join("skills.toml"),
+        format!("[skills]\na = '{url}'\nb = '{url}'\n"),
+    )
+    .unwrap();
+    let project_arg = project.to_str().unwrap();
+    e.ok(&["--project", project_arg, "sync"]);
+    let bad = fs::read_link(project.join(".agents/skills/b")).unwrap();
+    fs::write(bad.join("SKILL.md"), "drift").unwrap();
+    let before = verification_snapshot(&e.home);
+    e.ok(&["--project", project_arg, "verify", "a"]);
+    let result = e.skl(&["--project", project_arg, "verify"]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stdout).contains("drift: b"));
+    assert!(!e.config("skills.toml").exists());
+    assert_eq!(verification_snapshot(&e.home), before);
+}
+
+#[test]
+fn verify_xcode_digest_needs_no_tools_and_detects_content_changes() {
+    let e = Env::new();
+    e.write_manifest("[xcode]\nskills = '*'\nos = ['macos', 'linux']\n");
+    e.export_xcode(&[("example", "original")], "Xcode test");
+    assert!(e.xcode(&["sync"]).status.success());
+    let target = fs::read_link(e.codex("example")).unwrap();
+    let no_tools = e.home.join("no-tools");
+    fs::create_dir(&no_tools).unwrap();
+    let before = verification_snapshot(&e.home);
+    let verified = e.skl_with_env(&["verify", "--json"], &[("PATH", no_tools.as_os_str())]);
+    assert!(verified.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&verified.stdout).unwrap();
+    assert_eq!(report["data"]["skills"][0]["source_kind"], "xcode");
+    assert_eq!(report["data"]["skills"][0]["status"], "verified");
+    assert_eq!(verification_snapshot(&e.home), before);
+    fs::write(target.join("SKILL.md"), "altered").unwrap();
+    let changed = e.skl_with_env(&["verify"], &[("PATH", no_tools.as_os_str())]);
+    assert!(!changed.status.success());
+    assert!(String::from_utf8_lossy(&changed.stdout).contains("drift: example"));
+}
+
+#[test]
+fn verify_unavailable_tools_and_non_utf8_changes_are_structured_failures() {
+    let e = Env::new();
+    let url = e.repo("verification", &[("notes", "notes")]);
+    e.write_manifest(&format!("[skills]\nnotes = '{url}'\n"));
+    e.ok(&["sync"]);
+    let no_tools = e.home.join("no-tools");
+    fs::create_dir(&no_tools).unwrap();
+    let before = verification_snapshot(&e.home);
+    let unavailable = e.skl_with_env(&["verify", "--json"], &[("PATH", no_tools.as_os_str())]);
+    assert!(!unavailable.status.success());
+    assert!(unavailable.stderr.is_empty());
+    let report: serde_json::Value = serde_json::from_slice(&unavailable.stdout).unwrap();
+    assert_eq!(report["data"]["skills"][0]["status"], "unavailable");
+    assert!(report["diagnostics"][0]["path"].is_string());
+    assert_eq!(verification_snapshot(&e.home), before);
+    // macOS filesystems reject invalid UTF-8 filenames; exercise the complete
+    // runtime envelope on Linux and fallible serialization on all platforms below.
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let target = fs::read_link(e.codex("notes")).unwrap();
+        fs::write(
+            target.join(std::ffi::OsStr::from_bytes(b"non-utf8-\xff")),
+            "added",
+        )
+        .unwrap();
+        let result = e.skl(&["verify", "--json"]);
+        assert!(!result.status.success());
+        assert!(result.stderr.is_empty());
+        let error: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(error["status"], "error");
+        assert_eq!(error["diagnostics"][0]["code"], "runtime-error");
+    }
+}
+
+#[test]
+fn verify_undiscovered_wildcards_report_unavailable_without_creating_data() {
+    let e = Env::new();
+    e.write_manifest("[repositories.tools]\nsource = 'file:///unavailable'\nskills = '*'\n");
+    let before = verification_snapshot(&e.home);
+    let result = e.skl(&["verify", "--json"]);
+    assert!(!result.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["diagnostics"][0]["code"], "baseline-unavailable");
+    assert_eq!(verification_snapshot(&e.home), before);
+}
+
+#[test]
+fn verify_never_lazy_fetches_missing_promisor_objects() {
+    let e = Env::new();
+    let url = e.repo("verification", &[("notes", "notes")]);
+    e.write_manifest(&format!("[skills]\nnotes = '{url}'\n"));
+    e.ok(&["sync"]);
+    let repo = fs::read_dir(e.home.join(".local/share/skl/repos"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    git(&repo, &["config", "extensions.partialClone", "origin"]);
+    git(&repo, &["config", "remote.origin.url", &url]);
+    git(&repo, &["config", "remote.origin.promisor", "true"]);
+    fs::remove_dir_all(repo.join("objects")).unwrap();
+    fs::create_dir_all(repo.join("objects/pack")).unwrap();
+    fs::create_dir_all(repo.join("objects/info")).unwrap();
+    // The remote remains reachable: fetching could restore the missing objects,
+    // but verification must fail without modifying this partial cache.
+    let before = verification_snapshot(&e.home);
+    let result = e.skl(&["verify", "--json"]);
+    assert!(!result.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["data"]["skills"][0]["status"], "unavailable");
+    assert_eq!(verification_snapshot(&e.home), before);
+}
