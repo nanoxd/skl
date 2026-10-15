@@ -5,6 +5,7 @@ mod manifest;
 mod paths;
 mod profile;
 mod sync;
+mod xcode;
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -312,8 +313,9 @@ fn remove(paths: &Paths, names: &[String]) -> Result<()> {
 }
 
 fn list(paths: &Paths, active: &Active) -> Result<bool> {
-    let manifest = manifest::load(paths)?;
+    let mut manifest = manifest::load(paths)?;
     let lock = Lock::load(&paths.lock())?;
+    xcode::append_skills(paths, &mut manifest, &lock.xcode)?;
     let width = manifest
         .skills
         .iter()
@@ -329,6 +331,24 @@ fn list(paths: &Paths, active: &Active) -> Result<bool> {
         println!("Profiles: {names} ({})\n", active.from);
     }
     let mut healthy = true;
+    if let Some(config) = &manifest.xcode
+        && config.skills.is_none()
+        && !lock.xcode_all_complete
+        && config.enabled(active)
+    {
+        println!("Xcode: all skills selected; run `skl sync` to discover and export them");
+        healthy = false;
+    }
+    if let Some(config) = &manifest.xcode
+        && config.skills.is_none()
+        && lock.xcode.is_empty()
+        && !manifest::matches_os(&config.os)
+    {
+        println!(
+            "Xcode: all skills selected (only on {})",
+            config.os.join(", ")
+        );
+    }
     for skill in &manifest.skills {
         let (origin, version) = match &skill.origin {
             Origin::Git(o) => {
@@ -347,9 +367,16 @@ fn list(paths: &Paths, active: &Active) -> Result<bool> {
                     );
                 (o.source.clone(), version)
             }
-            Origin::Local(dir) => (paths.tilde(dir), "local".to_string()),
+            Origin::Local(dir) => match lock.xcode.get(&skill.name) {
+                Some(entry) if *dir == xcode::skill_dir(paths, &skill.name, entry) => {
+                    ("Xcode".into(), entry.version.replace('\n', " / "))
+                }
+                _ => (paths.tilde(dir), "local".to_string()),
+            },
         };
-        let status = if !active.includes(&skill.profiles) {
+        let status = if !manifest::matches_os(&skill.os) {
+            format!("  (only on {})", skill.os.join(", "))
+        } else if !active.includes(&skill.profiles) {
             format!("  (only for {})", skill.profiles.join(", "))
         } else {
             let missing: Vec<&str> = skill

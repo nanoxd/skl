@@ -31,19 +31,106 @@ pub struct Options {
 /// Brings the lock, the store and every agent's links in line with the manifest.
 /// Returns false when some skill or link couldn't be put in place.
 pub fn run(paths: &Paths, active: &Active, opts: &Options) -> Result<bool> {
-    let manifest = manifest::load(paths)?;
+    let mut manifest = manifest::load(paths)?;
     let old_lock = Lock::load(&paths.lock())?;
     let git = Git::new(paths.repos());
     let mut out = Report::new(opts.dry_run);
 
-    // Skills outside this machine's profiles are left exactly as the lock has them, so
-    // machines with different profiles never fight over skills.lock.
-    let in_profile = |skill: &Skill| active.includes(&skill.profiles);
+    let mut xcode_entries = BTreeMap::new();
+    let mut xcode_all_complete = false;
+    if let Some(config) = &manifest.xcode {
+        xcode_entries = old_lock
+            .xcode
+            .iter()
+            .filter(|(n, _)| config.selects(n))
+            .map(|(n, e)| (n.clone(), e.clone()))
+            .collect();
+        xcode_all_complete = config.skills.is_none() && old_lock.xcode_all_complete;
+        let unrelated_update = opts.update.as_ref().is_some_and(|names| {
+            !names.is_empty()
+                && names
+                    .iter()
+                    .all(|name| manifest.skills.iter().any(|s| &s.name == name))
+        });
+        if !config.enabled(active) {
+            xcode_entries = old_lock.xcode.clone();
+            xcode_all_complete = old_lock.xcode_all_complete;
+        } else if config.skills.as_ref().is_some_and(|s| s.is_empty()) {
+            if opts.locked && !old_lock.xcode.is_empty() {
+                bail!("skills.lock still contains Xcode skills; run `skl sync` without --locked");
+            }
+        } else if !unrelated_update {
+            if opts.locked {
+                if xcode_entries != old_lock.xcode
+                    || config
+                        .skills
+                        .as_ref()
+                        .is_some_and(|names| names.iter().any(|n| !xcode_entries.contains_key(n)))
+                    || config.skills.is_none() && !xcode_all_complete
+                    || xcode_entries.iter().any(|(n, e)| {
+                        !crate::xcode::skill_dir(paths, n, e)
+                            .join("SKILL.md")
+                            .is_file()
+                    })
+                {
+                    bail!(
+                        "Xcode exports are not cached for this selection; run `skl sync` without --locked"
+                    );
+                }
+            } else if opts.dry_run {
+                out.note("would run `xcrun agent skills export <staging-directory>` and select Xcode skills".into());
+            } else {
+                match crate::xcode::Export::run().and_then(|export| {
+                    let (entries, errors) = export.install(
+                        paths,
+                        config,
+                        &old_lock.xcode,
+                        &manifest.skills,
+                        opts.update.as_ref(),
+                    )?;
+                    let complete = config.skills.is_none() && export.covers_all(&entries);
+                    Ok((entries, errors, complete))
+                }) {
+                    Ok((entries, errors, complete)) => {
+                        xcode_all_complete = complete;
+                        for (name, entry) in &entries {
+                            if old_lock.xcode.get(name) != Some(entry) {
+                                out.event(
+                                    if old_lock.xcode.contains_key(name) {
+                                        '↑'
+                                    } else {
+                                        '+'
+                                    },
+                                    name,
+                                    format!("Xcode {}", entry.version.replace('\n', " / ")),
+                                );
+                            }
+                        }
+                        xcode_entries = entries;
+                        for error in errors {
+                            out.error("Xcode", &error);
+                        }
+                    }
+                    Err(err) => out.error("Xcode", &format!("{err:#}")),
+                }
+            }
+        }
+    } else if opts.locked && !old_lock.xcode.is_empty() {
+        bail!("skills.lock still contains Xcode skills; run `skl sync` without --locked");
+    }
+    crate::xcode::append_skills(paths, &mut manifest, &xcode_entries)?;
+
+    // Excluded skills retain their lock entries across machines with different OSes
+    // or profiles. Their owned links are removed by reconciliation below.
+    let enabled = |skill: &Skill| skill.enabled(active);
     if let Some(names) = &opts.update {
         for name in names {
             match manifest.skills.iter().find(|s| &s.name == name) {
                 None => bail!("`{name}` isn't in the manifest"),
-                Some(skill) if !in_profile(skill) => {
+                Some(skill) if !manifest::matches_os(&skill.os) => {
+                    bail!("`{name}` is not enabled on {}", std::env::consts::OS)
+                }
+                Some(skill) if !enabled(skill) => {
                     bail!("`{name}` isn't in this machine's profiles")
                 }
                 Some(_) => {}
@@ -59,7 +146,7 @@ pub fn run(paths: &Paths, active: &Active, opts: &Options) -> Result<bool> {
     let git_skills: Vec<(&Skill, &GitOrigin)> = manifest
         .skills
         .iter()
-        .filter(|s| in_profile(s))
+        .filter(|s| enabled(s))
         .filter_map(|s| match &s.origin {
             Origin::Git(origin) => Some((s, origin)),
             Origin::Local(_) => None,
@@ -140,10 +227,12 @@ pub fn run(paths: &Paths, active: &Active, opts: &Options) -> Result<bool> {
     // network never drops it.
     let mut lock = Lock {
         version: old_lock.version,
+        xcode_all_complete,
+        xcode: xcode_entries,
         skills: manifest
             .skills
             .iter()
-            .filter(|s| !in_profile(s))
+            .filter(|s| !enabled(s))
             .filter_map(|s| Some((s.name.clone(), old_lock.skills.get(&s.name)?.clone())))
             .collect(),
     };
@@ -265,7 +354,7 @@ pub fn run(paths: &Paths, active: &Active, opts: &Options) -> Result<bool> {
 
     // Work out where every link should point.
     let mut desired = BTreeMap::new();
-    for skill in manifest.skills.iter().filter(|s| in_profile(s)) {
+    for skill in manifest.skills.iter().filter(|s| enabled(s)) {
         if failed.contains(&skill.name) {
             for agent in &skill.agents {
                 let link = agent.dir.join(&skill.name);
@@ -281,6 +370,16 @@ pub fn run(paths: &Paths, active: &Active, opts: &Options) -> Result<bool> {
                 skill_dir(&origin.url, &entry.commit, &entry.subdir)
             }
             Origin::Local(dir) => {
+                if opts.dry_run
+                    && manifest
+                        .xcode
+                        .as_ref()
+                        .is_some_and(|c| c.selects(&skill.name))
+                    && dir.starts_with(paths.store().join("xcode"))
+                    && !dir.join("SKILL.md").is_file()
+                {
+                    continue;
+                }
                 if !dir.join("SKILL.md").is_file() {
                     out.error(
                         &skill.name,
@@ -305,6 +404,9 @@ pub fn run(paths: &Paths, active: &Active, opts: &Options) -> Result<bool> {
         }
     }
 
+    if opts.locked && lock != old_lock {
+        bail!("skills.lock is out of date: run `skl sync` without --locked");
+    }
     let state = reconcile(paths, &recorded, &desired, opts, &mut out)?;
 
     if !opts.dry_run {
@@ -315,7 +417,7 @@ pub fn run(paths: &Paths, active: &Active, opts: &Options) -> Result<bool> {
         let inactive: BTreeSet<&str> = manifest
             .skills
             .iter()
-            .filter(|s| !in_profile(s))
+            .filter(|s| !enabled(s))
             .map(|s| s.name.as_str())
             .collect();
         collect_garbage(paths, &lock, &inactive, &state)?;
@@ -642,6 +744,11 @@ fn collect_garbage(
             Some((git::cache_key(&url), l.commit.clone()))
         })
         .collect();
+    for (name, entry) in &lock.xcode {
+        if !inactive.contains(name.as_str()) {
+            live.insert(("xcode".into(), entry.digest.clone()));
+        }
+    }
     for link in &state.links {
         if let Ok(rest) = link.target.strip_prefix(&store) {
             let mut parts = rest

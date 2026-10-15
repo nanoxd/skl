@@ -22,6 +22,31 @@ pub struct Manifest {
     /// The agents skills link into unless they name their own.
     pub agents: Vec<Agent>,
     pub skills: Vec<Skill>,
+    pub xcode: Option<Xcode>,
+}
+
+pub struct Xcode {
+    /// None selects every exported skill.
+    pub skills: Option<Vec<String>>,
+    pub agents: Vec<Agent>,
+    pub profiles: Vec<String>,
+    pub os: Vec<String>,
+}
+
+pub fn matches_os(os: &[String]) -> bool {
+    os.is_empty() || os.iter().any(|name| name == std::env::consts::OS)
+}
+
+impl Xcode {
+    pub fn enabled(&self, active: &crate::profile::Active) -> bool {
+        matches_os(&self.os) && active.includes(&self.profiles)
+    }
+
+    pub fn selects(&self, name: &str) -> bool {
+        self.skills
+            .as_ref()
+            .is_none_or(|names| names.iter().any(|n| n == name))
+    }
 }
 
 pub struct Skill {
@@ -30,6 +55,13 @@ pub struct Skill {
     pub agents: Vec<Agent>,
     /// Profiles this skill installs under. Empty means every machine.
     pub profiles: Vec<String>,
+    pub os: Vec<String>,
+}
+
+impl Skill {
+    pub fn enabled(&self, active: &crate::profile::Active) -> bool {
+        matches_os(&self.os) && active.includes(&self.profiles)
+    }
 }
 
 pub enum Origin {
@@ -67,6 +99,49 @@ pub fn parse(text: &str, paths: &Paths) -> Result<Manifest> {
             .map(|id| agents::resolve(id, paths))
             .collect::<Result<_>>()?,
     };
+    let xcode = table
+        .remove("xcode")
+        .map(|value| -> Result<Xcode> {
+            let Value::Table(mut config) = value else {
+                bail!("`xcode` must be a table")
+            };
+            let skills = match config.remove("skills") {
+                Some(Value::String(s)) if s == "*" => None,
+                Some(Value::Array(items)) => {
+                    let mut names = Vec::new();
+                    for item in items {
+                        let Value::String(name) = item else {
+                            bail!("`xcode.skills` must contain names")
+                        };
+                        validate_name(&name)?;
+                        if !names.contains(&name) {
+                            names.push(name);
+                        }
+                    }
+                    Some(names)
+                }
+                _ => bail!("set `xcode.skills` to `\"*\"` or an array of names"),
+            };
+            if let Some(key) = config
+                .keys()
+                .find(|k| !matches!(k.as_str(), "agents" | "profiles" | "os"))
+            {
+                bail!("unknown xcode key `{key}`");
+            }
+            config
+                .entry("os".to_string())
+                .or_insert_with(|| Value::Array(vec![Value::String("macos".into())]));
+            // Reuse per-skill agents, profiles and OS validation.
+            config.insert("path".into(), Value::String(".".into()));
+            let options = parse_skill("xcode", Value::Table(config), &default_agents, paths)?;
+            Ok(Xcode {
+                skills,
+                agents: options.agents,
+                profiles: options.profiles,
+                os: options.os,
+            })
+        })
+        .transpose()?;
     let skills = match table.remove("skills") {
         Some(Value::Table(skills)) => skills,
         Some(_) => bail!("`skills` must be a table"),
@@ -86,6 +161,7 @@ pub fn parse(text: &str, paths: &Paths) -> Result<Manifest> {
     Ok(Manifest {
         agents: default_agents,
         skills: parsed,
+        xcode,
     })
 }
 
@@ -98,6 +174,7 @@ fn parse_skill(name: &str, value: Value, default_agents: &[Agent], paths: &Paths
                 origin,
                 agents: default_agents.to_vec(),
                 profiles: Vec::new(),
+                os: Vec::new(),
             });
         }
         Value::Table(table) => table,
@@ -118,6 +195,25 @@ fn parse_skill(name: &str, value: Value, default_agents: &[Agent], paths: &Paths
     let agents = match table.remove("agents") {
         Some(value) => agent_list(&value, "agents", paths)?,
         None => default_agents.to_vec(),
+    };
+    let os = match table.remove("os") {
+        None => Vec::new(),
+        Some(Value::Array(items)) if !items.is_empty() => {
+            let mut names = Vec::new();
+            for item in items {
+                let Value::String(name) = item else {
+                    bail!("`os` must be an array of strings")
+                };
+                if !matches!(name.as_str(), "macos" | "linux") {
+                    bail!("unknown operating system `{name}`: use `macos` or `linux`");
+                }
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+            names
+        }
+        Some(_) => bail!("`os` must be a non-empty array of strings"),
     };
     let profiles = match table.remove("profiles") {
         None => Vec::new(),
@@ -153,6 +249,7 @@ fn parse_skill(name: &str, value: Value, default_agents: &[Agent], paths: &Paths
         origin,
         agents,
         profiles,
+        os,
     })
 }
 

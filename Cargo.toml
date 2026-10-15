@@ -18,7 +18,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.8"
 toml_edit = "0.25.17"
 
-[dev-dependencies]
+sha2 = "0.10"
 tempfile = "3.27.0"
 
 [profile.release]
