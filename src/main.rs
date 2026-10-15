@@ -1,3 +1,4 @@
+mod adopt;
 mod agents;
 mod discover;
 mod doctor;
@@ -130,6 +131,22 @@ enum Command {
         /// Only edit the manifest
         #[arg(long)]
         no_sync: bool,
+    },
+    /// Snapshot an unmanaged installed skill into portable local configuration
+    Adopt {
+        /// Installed directory name (as shown by `skl list`)
+        name: String,
+        /// Agent name or skills directory containing the installed skill
+        #[arg(long)]
+        from: String,
+        #[command(flatten)]
+        options: SkillOptions,
+        /// Copy and register only; leave installation for a later sync
+        #[arg(long)]
+        no_sync: bool,
+        /// Validate and preview without writing anything
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Browse skills in a git repository without installing them
     Discover {
@@ -335,6 +352,7 @@ fn run(cli: Cli) -> Result<bool> {
         Command::Update { plan: Some(_), .. }
         | Command::Update { dry_run: true, .. }
         | Command::Sync { dry_run: true, .. }
+        | Command::Adopt { dry_run: true, .. }
         | Command::List { .. }
         | Command::Info { .. }
         | Command::Doctor { .. }
@@ -408,6 +426,20 @@ fn run(cli: Cli) -> Result<bool> {
             };
             add(&paths, &source, &skills, all, &options, selected_collection)?;
             if no_sync {
+                Ok(true)
+            } else {
+                sync::run(&paths, &active()?, &sync::Options::default())
+            }
+        }
+        Command::Adopt {
+            name,
+            from,
+            options,
+            no_sync,
+            dry_run,
+        } => {
+            adopt::run(&paths, &name, &from, &options, dry_run)?;
+            if no_sync || dry_run {
                 Ok(true)
             } else {
                 sync::run(&paths, &active()?, &sync::Options::default())
@@ -913,6 +945,9 @@ fn list(paths: &Paths, active: &Active) -> Result<bool> {
         for (id, name, what) in &unmanaged {
             println!("  {id:<id_width$}  {name:<name_width$}  {what}");
         }
+    }
+    if !unmanaged.is_empty() {
+        println!("Snapshot an installed skill with `skl adopt NAME --from AGENT --dry-run`.");
     }
     if !healthy {
         eprintln!("Run `skl sync` to fix missing links");

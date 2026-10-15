@@ -49,7 +49,7 @@ Generate shell completions with `skl completions bash`, `skl completions zsh`, o
 ## Documentation
 
 - [Getting started](docs/getting-started.md) — installation and dotfiles setup
-- [Finding and adding skills](docs/adding-skills.md) — search, repositories, and local skills
+- [Finding and adding skills](docs/adding-skills.md) — search, repositories, local skills, and adopting installed skills
 - [Configuration](docs/configuration.md) — manifest, repository groups, and lockfile
 - [Agents and profiles](docs/agents-and-profiles.md) — destinations and machine selection
 - [Project skills](docs/projects.md) — share skills with a team

@@ -138,3 +138,50 @@ the harnesses that might read them. Detection never changes your default agents.
 that project instead of your home directory, and selection includes project-only
 harnesses such as Eve. Shared project skill directories do not identify individual
 harnesses either.
+
+## Adopting installed skills
+
+`list` also shows skills skl does not manage. Choose an installed directory name
+and its agent explicitly, then preview a durable local snapshot:
+
+```sh
+skl list
+skl adopt review --from claude-code --dry-run
+skl adopt review --from claude-code --no-sync
+skl sync --dry-run
+```
+
+`adopt` copies the directory into `local/review` beside `skills.toml` and adds
+`review = { path = "local/review" }`. Commit both the manifest and `local/` to
+your dotfiles to carry the snapshot to another machine. This is a one-time copy;
+future source edits and `skl update` do not update it. Remote provenance is never
+inferred. Use `add SOURCE` instead when you already know the Git source to track,
+or `add DIRECTORY` when you deliberately want a live local path.
+
+Without `--no-sync`, adoption runs ordinary sync after registering the snapshot.
+The original directory or user symlink is preserved and remains an unmanaged
+conflict; other available destinations receive links. Sync can therefore report
+failure even though the snapshot and manifest were saved. After reviewing
+`skl sync --dry-run`, explicitly run `skl sync --force` if you want existing
+installations backed up and replaced using skl's normal ownership rules. Adoption
+never silently claims an existing link, even when it points into skl's store.
+
+`--from` accepts a known agent or a custom absolute/`~/...` skills directory.
+`--agent`, `--only-profile`, and `--os` set the snapshot's destinations and
+selection restrictions just as with `add`; absent overrides use manifest defaults.
+`--project PATH adopt ...` reads that project's agent directories and writes the
+snapshot beside its project manifest. These commands never discover or import
+other skills implicitly.
+
+A top-level installed symlink is copied from its resolved directory, leaving the
+link unchanged. The source must contain a regular `SKILL.md`; nested symlinks
+(including cycles) and special files are rejected rather than retaining transient
+references. An existing snapshot destination, an existing manifest name, or an
+already owned installation is rejected before copying. Failed copying leaves no
+published snapshot, and failed manifest publication removes the new snapshot.
+`--dry-run` validates and previews without writing configuration, state, locks,
+store content, or links.
+
+Names supplied by cached repository collections or Xcode imports also count as
+existing declarations. If wildcard membership has not been cached completely,
+run `skl sync` first so adoption can check for collisions before copying.
