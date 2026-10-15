@@ -6,10 +6,30 @@ title: skl documentation
 
 <img src="assets/skl-mascot.png" alt="A playful skull mascot waving, carrying a backpack of skill cards" width="180">
 
-Keep agent skills in sync across coding agents and machines. A manifest selects
-your skills, a lockfile pins Git versions, and `skl sync` installs them.
+File-based skill management for coding agents. Declare your skills in
+`skills.toml`, commit it with `skills.lock`, and run `skl sync` to install them
+across agents and machines.
 
 [Get started](getting-started.md) · [Download a release](https://github.com/nanoxd/skl/releases) · [GitHub](https://github.com/nanoxd/skl)
+
+## How it works
+
+Your skill setup lives in two files you can review in Git and share:
+
+| File | Purpose |
+| --- | --- |
+| `skills.toml` | You edit this manifest to choose skills, sources, and agent destinations. |
+| `skills.lock` | `skl` generates this lockfile to pin Git skills to exact commits. Commit it alongside the manifest. |
+
+Run `skl sync` to apply the files: it fetches skills, links them into your agents,
+and removes links it owns for skills you deselect. `skl add`, `skl configure`,
+and `skl remove` edit the manifest and sync for you; you can also edit it directly
+in your editor.
+
+Keep the files in your dotfiles for your machines, or at a
+[project's root](projects.md) for your team. Restore them on another machine and
+sync to install the pinned Git versions. Caches and link ownership state stay
+on each machine; see [storage and safety](storage-and-safety.md).
 
 ## Guides
 

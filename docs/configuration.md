@@ -6,7 +6,11 @@ title: Configuration
 
 # Configuration
 
-Choose sources in `skills.toml`; commit it alongside `skills.lock`.
+`skills.toml` is the source of truth for your skill setup. Edit it in your editor
+and run `skl sync` to apply your changes. The `add`, `configure`, and `remove`
+commands edit the same file, preserving comments and formatting, then sync by
+default. Commit the manifest alongside the generated `skills.lock` so other
+machines can install the pinned Git versions.
 
 [Manifest](#manifest) · [Repository groups](#repository-groups) · [Lockfile](#lockfile)
 

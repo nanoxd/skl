@@ -6,7 +6,7 @@ title: Getting started
 
 # Getting started
 
-Install skl, add your first skills, and share them through dotfiles.
+Describe your skills in a file, apply it with skl, and share it through dotfiles.
 
 [Install](#install) · [Quick start](#quick-start) · [Dotfiles integration](#dotfiles-integration)
 
@@ -42,23 +42,54 @@ brew upgrade nanoxd/skl/skl
 
 ## Quick start
 
-On the first machine, add skills:
+Create `~/.config/skl/skills.toml` in your editor. Create the directory first if
+it doesn't exist. This manifest describes the skills you want and which agents
+should receive them:
 
-```sh
-skl add example/notes
-skl add example/agent-skills --skill review
-skl add ~/dev/skills/my-skill
+```toml
+agents = ["claude-code", "codex"]
+
+[skills]
+skill-creator = { source = "anthropics/skills", subdir = "skills/skill-creator" }
 ```
 
-Each `add` edits `~/.config/skl/skills.toml`, resolves the skill to a commit in
-`skills.lock`, and links it into `~/.claude/skills` and `~/.agents/skills`. Commit
-both files to your dotfiles.
+For more options, see the annotated
+[example manifest](https://github.com/nanoxd/skl/blob/main/examples/skills.toml)
+and [configuration reference](configuration.md).
 
-On every other machine, pull your dotfiles and run:
+Apply the manifest:
 
 ```sh
-skl sync
+skl sync --dry-run  # Preview the changes
+skl sync           # Fetch, lock, and link the skills
 ```
+
+`sync` generates `~/.config/skl/skills.lock` with the Git commit it installed and
+links the skill into `~/.claude/skills` and `~/.agents/skills`. Commit the manifest
+and lockfile to your dotfiles. You edit the manifest; `skl` maintains the lockfile.
+
+To change your setup, edit `skills.toml` and run `skl sync` again. Adding an entry
+installs a skill; removing an entry removes the links `skl` owns for that skill.
+Existing Git skills keep their pinned versions until you run `skl update` or
+change their source, ref, or subdirectory.
+
+The CLI offers shortcuts for editing the same manifest and syncing it:
+
+```sh
+skl add anthropics/skills --skill skill-creator
+skl configure skill-creator --agent codex
+skl remove skill-creator
+```
+
+On every other machine, restore those two files from your dotfiles and run:
+
+```sh
+skl sync --locked
+```
+
+`--locked` installs the pinned Git versions and fails if the manifest would
+require a lockfile change. Local `path` skills link directly to their source
+directories, so restore those directories too; their contents aren't pinned.
 
 ## Dotfiles integration
 
