@@ -73,6 +73,8 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Build Homebrew formula updater
+        run: cargo build --locked --example update_homebrew
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -113,4 +115,24 @@ jobs:
           # Apply only the changelog commit, preserving newer branch commits.
           # Conflicts or concurrent pushes fail safely; never force-push.
           git cherry-pick "$CHANGELOG_COMMIT"
+          git push origin "HEAD:refs/heads/$DEFAULT_BRANCH"
+      - name: Update Homebrew formula on the default branch
+        env:
+          TAG: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          git fetch origin "$DEFAULT_BRANCH"
+          git checkout -B release-homebrew FETCH_HEAD
+          # Use the helper built from the tag, but edit the latest branch formula.
+          # It verifies all archives and skips prereleases and older versions.
+          target/debug/examples/update_homebrew "$TAG" dist
+          if git diff --quiet -- Formula/skl.rb; then
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Formula/skl.rb
+          git commit -m "build: update Homebrew formula for $TAG"
+          # Never overwrite concurrent branch changes; a failed push can be rerun.
           git push origin "HEAD:refs/heads/$DEFAULT_BRANCH"

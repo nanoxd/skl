@@ -12,6 +12,15 @@ Install skl, add your first skills, and share them through dotfiles.
 
 ## Install
 
+With Homebrew (macOS or Linux):
+
+```sh
+brew tap nanoxd/skl https://github.com/nanoxd/skl
+brew install nanoxd/skl/skl
+```
+
+Or build from source with Cargo:
+
 ```sh
 cargo install --git https://github.com/nanoxd/skl
 ```
@@ -19,6 +28,17 @@ cargo install --git https://github.com/nanoxd/skl
 Prebuilt binaries for macOS (Apple Silicon and Intel) and Linux (x86_64 and ARM64, glibc) are attached to each
 [release](https://github.com/nanoxd/skl/releases). `skl` needs `git` and `tar` on
 your `PATH`.
+
+The formula installs a checksum-verified release binary for ARM64 or x86_64;
+no Rust toolchain is needed. The explicit tap URL is required because this
+repository is named `skl`, rather than `homebrew-skl`.
+
+To upgrade:
+
+```sh
+brew update
+brew upgrade nanoxd/skl/skl
+```
 
 ## Quick start
 

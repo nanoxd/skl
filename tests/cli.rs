@@ -1370,6 +1370,9 @@ fn release_saves_to_advanced_branch_and_reruns_without_duplicate_commits() {
     let save_step = workflow
         .split("      - name: Save changelog on the default branch\n")
         .nth(1)
+        .unwrap()
+        .split("      - name:")
+        .next()
         .unwrap();
     let script = save_step
         .split("        run: |\n")
@@ -3654,4 +3657,74 @@ fn repository_alias_only_supports_saved_plans_and_rejects_invalid_options() {
         other_os()
     ));
     e.ok(&["sync"]);
+}
+
+#[path = "../examples/update_homebrew.rs"]
+mod release_homebrew;
+
+#[test]
+fn homebrew_release_updates_all_archives_and_preserves_formula_test() {
+    use sha2::{Digest, Sha256};
+    let tmp = TempDir::new().unwrap();
+    let original = include_str!("../Formula/skl.rb");
+    let targets = [
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-gnu",
+    ];
+    for target in targets {
+        let archive = format!("skl-{target}.tar.gz");
+        fs::write(tmp.path().join(&archive), target).unwrap();
+        let hash = format!("{:x}", Sha256::digest(target.as_bytes()));
+        fs::write(
+            tmp.path().join(format!("{archive}.sha256")),
+            format!("{hash}  {archive}\n"),
+        )
+        .unwrap();
+    }
+    let updated = release_homebrew::update(original, "v99.0.0", tmp.path()).unwrap();
+    assert_eq!(updated.matches("/v99.0.0/").count(), 4);
+    for target in targets {
+        let hash = format!("{:x}", Sha256::digest(target.as_bytes()));
+        assert!(updated.contains(&format!("sha256 \"{hash}\"")));
+    }
+    assert_eq!(
+        updated.split("  def install").nth(1),
+        original.split("  def install").nth(1)
+    );
+    assert_eq!(
+        release_homebrew::update(&updated, "v99.0.0", tmp.path()).unwrap(),
+        updated
+    );
+    // Old and prerelease tags do not require artifacts or downgrade the tap.
+    let missing = tmp.path().join("missing");
+    for tag in ["v98.0.0", "v100.0.0-rc.1", "v100.0.0+build.1"] {
+        assert_eq!(
+            release_homebrew::update(&updated, tag, &missing).unwrap(),
+            updated
+        );
+    }
+    assert!(release_homebrew::update(original, "v99.0.0", &missing).is_err());
+    assert!(release_homebrew::update(original, "v99.0", tmp.path()).is_err());
+    assert!(
+        release_homebrew::update(
+            &original.replace("sha256", "missing"),
+            "v99.0.0",
+            tmp.path()
+        )
+        .is_err()
+    );
+    // A corrupt archive or incorrect sidecar filename fails the whole update.
+    let archive = "skl-x86_64-unknown-linux-gnu.tar.gz";
+    let path = tmp.path().join(archive);
+    fs::write(&path, "corrupt").unwrap();
+    assert!(release_homebrew::update(original, "v99.0.0", tmp.path()).is_err());
+    let hash = format!("{:x}", Sha256::digest(b"corrupt"));
+    fs::write(
+        tmp.path().join(format!("{archive}.sha256")),
+        format!("{hash}  wrong.tar.gz\n"),
+    )
+    .unwrap();
+    assert!(release_homebrew::update(original, "v99.0.0", tmp.path()).is_err());
 }

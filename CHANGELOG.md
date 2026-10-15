@@ -4,6 +4,13 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- In-repository Homebrew formula for checksum-verified macOS and Linux release
+  binaries on ARM64 and x86_64, with installation and update instructions.
+- Automatic Homebrew formula updates after stable tag releases, with archive
+  verification and protection against downgrading to older releases.
+
 ## [0.2.0] - 2026-10-15
 
 ### Added

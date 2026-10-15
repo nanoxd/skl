@@ -41,6 +41,27 @@ Pull the automated commit before preparing the next release.
 
 This automates changelog headings, not the package version in `Cargo.toml`.
 
+## Maintaining the Homebrew formula
+
+The tag release workflow updates all four release URLs and SHA-256 values in
+[`Formula/skl.rb`](https://github.com/nanoxd/skl/blob/main/Formula/skl.rb) after uploading the binaries. It verifies each
+archive against its checksum sidecar, then commits the formula to the default
+branch. `brew update` picks up that commit. Prerelease/build-metadata tags and
+older versions leave the stable formula unchanged.
+
+The workflow needs permission to push to the default branch, just like its
+changelog update. Protected-branch rules may require allowing the release bot.
+Concurrent pushes fail safely without force-pushing; rerun the failed release
+job to retry. Repeating an unchanged release does not create another formula
+commit. To update manually, download all four archives and `.sha256` sidecars
+into `dist`, then run `cargo run --locked --example update_homebrew -- vX.Y.Z dist`.
+
+Validate the updated formula with `brew style nanoxd/skl/skl`, then reinstall
+and run `brew test nanoxd/skl/skl` using a tap checkout containing the update.
+The formula test installs, syncs, and removes a local skill in a temporary home.
+See Homebrew's [tap documentation](https://docs.brew.sh/How-to-Create-and-Maintain-a-Tap)
+for working with a local tap checkout.
+
 ## Publishing the documentation
 
 The Markdown files in `docs/` also form a GitHub Pages site. Edit them once;
