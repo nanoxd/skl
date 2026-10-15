@@ -773,12 +773,8 @@ fn configure_skills(
 
 fn remove(paths: &Paths, names: &[String]) -> Result<()> {
     let mut doc = read_manifest_doc(paths)?;
-    let table = skills_table(&mut doc)?;
-    for name in names {
-        if table.remove(name).is_none() {
-            bail!("`{name}` isn't in the manifest");
-        }
-    }
+    let lock = Lock::load(&paths.lock())?;
+    repositories::exclude_removed(paths, &mut doc, &lock.repositories, names)?;
     write_atomic(&paths.manifest(), doc.to_string().as_bytes())
 }
 

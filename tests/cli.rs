@@ -3794,3 +3794,161 @@ fn completions_require_a_supported_shell() {
     assert!(!env.home.join(".local").exists());
     assert!(!env.home.join(".config").exists());
 }
+
+#[test]
+fn repository_exclusions_filter_complete_coverage_and_allow_explicit_overrides() {
+    let e = Env::new();
+    let url = e.repo("group", &[("a", "a"), ("b", "b"), ("c", "c")]);
+    e.write_manifest(&format!("[repositories.tools]\nsource = '{url}'\nskills = '*'\nexclude = ['a', 'b', 'future', 'a']\n[skills]\na = {{ repository = 'tools', agents = ['codex'] }}\nb = {{ source = '{url}', subdir = 'b', agents = ['claude-code'] }}\n"));
+    e.ok(&["sync"]);
+    assert!(e.codex("a").exists());
+    assert!(!e.claude("a").exists());
+    assert!(e.claude("b").exists());
+    assert!(!e.codex("b").exists());
+    assert!(e.codex("c").exists());
+    let lock: toml::Value =
+        toml::from_str(&fs::read_to_string(e.config("skills.lock")).unwrap()).unwrap();
+    assert_eq!(
+        lock["repositories"]["tools"]["members"]
+            .as_table()
+            .unwrap()
+            .len(),
+        3
+    );
+    write_skill(&e.remote("group").join("future"), "future", "later");
+    commit(&e.remote("group"), "add excluded future skill");
+    e.ok(&["sync"]);
+    assert!(!e.codex("future").exists());
+    fs::remove_dir_all(e.remote("group")).unwrap();
+    e.ok(&["sync", "--locked"]);
+    e.ok(&["doctor"]);
+    e.ok(&["list", "--json"]);
+}
+
+#[test]
+fn repository_exclusions_reconcile_safely_and_keep_dry_runs_read_only() {
+    let e = Env::new();
+    let url = e.repo("group", &[("a", "a"), ("b", "b")]);
+    let manifest = format!("[repositories.tools]\nsource = '{url}'\nskills = '*'\n");
+    e.write_manifest(&manifest);
+    e.ok(&["sync"]);
+    let lock = fs::read(e.config("skills.lock")).unwrap();
+    let state_path = e.home.join(".local/share/skl/state.toml");
+    let state = fs::read(&state_path).unwrap();
+    let target = fs::read_link(e.codex("a")).unwrap();
+    // Replacing an owned link with user content must preserve that content.
+    fs::remove_file(e.claude("a")).unwrap();
+    fs::create_dir(e.claude("a")).unwrap();
+    fs::write(e.claude("a").join("mine"), "user").unwrap();
+    e.write_manifest(&format!("{manifest}exclude = ['a']\n"));
+    e.fails(&["sync", "--locked"]);
+    assert_eq!(fs::read(e.config("skills.lock")).unwrap(), lock);
+    assert_eq!(fs::read_link(e.codex("a")).unwrap(), target);
+    e.ok(&["sync", "--dry-run"]);
+    assert_eq!(fs::read(e.config("skills.lock")).unwrap(), lock);
+    assert_eq!(fs::read(&state_path).unwrap(), state);
+    assert_eq!(fs::read_link(e.codex("a")).unwrap(), target);
+    e.ok(&["sync"]);
+    assert!(!e.codex("a").exists());
+    assert_eq!(
+        fs::read_to_string(e.claude("a").join("mine")).unwrap(),
+        "user"
+    );
+    assert!(e.codex("b").exists());
+    let lock = fs::read(e.config("skills.lock")).unwrap();
+    fs::remove_dir_all(e.remote("group")).unwrap();
+    e.ok(&["sync", "--locked"]);
+    assert_eq!(fs::read(e.config("skills.lock")).unwrap(), lock);
+}
+
+#[test]
+fn remove_wildcard_members_and_overrides_records_exclusions_atomically() {
+    let e = Env::new();
+    let url = e.repo("group", &[("a", "a"), ("b", "b")]);
+    let manifest = format!(
+        "# keep this comment\n[repositories.tools]\nsource = '{url}'\nskills = '*'\n[skills]\na = {{ repository = 'tools', agents = ['codex'] }} # override\n"
+    );
+    e.write_manifest(&manifest);
+    e.ok(&["sync"]);
+    e.fails(&["remove", "a", "missing"]);
+    assert_eq!(
+        fs::read_to_string(e.config("skills.toml")).unwrap(),
+        manifest
+    );
+    assert!(e.codex("a").exists());
+    // Atomic writes follow a dotfile symlink while preserving comments.
+    let dotfile = e.home.join("skills.toml");
+    fs::rename(e.config("skills.toml"), &dotfile).unwrap();
+    std::os::unix::fs::symlink(&dotfile, e.config("skills.toml")).unwrap();
+    e.ok(&["remove", "a", "b"]);
+    assert!(
+        fs::symlink_metadata(e.config("skills.toml"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    let text = fs::read_to_string(&dotfile).unwrap();
+    assert!(text.contains("# keep this comment"));
+    let doc: toml::Value = toml::from_str(&text).unwrap();
+    assert_eq!(
+        doc["repositories"]["tools"]["exclude"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(!e.codex("a").exists());
+    assert!(!e.codex("b").exists());
+    e.ok(&["sync"]);
+    assert!(!e.codex("a").exists());
+    assert!(!e.codex("b").exists());
+    e.ok(&["sync", "--locked"]);
+}
+
+#[test]
+fn repository_exclusions_validate_and_disabled_groups_remain_offline() {
+    let e = Env::new();
+    for config in [
+        "skills = '*'\nexclude = 'a'",
+        "skills = '*'\nexclude = [42]",
+        "skills = '*'\nexclude = ['../a']",
+        "skills = ['a']\nexclude = ['a']",
+        "exclude = []",
+    ] {
+        e.write_manifest(&format!("[repositories.tools]\nsource = 'a/b'\n{config}\n"));
+        e.fails(&["list"]);
+        assert!(!e.config("skills.lock").exists());
+    }
+    let url = e.repo("group", &[("a", "a"), ("b", "b")]);
+    e.write_manifest(&format!("[repositories.tools]\nsource = '{url}'\nskills = '*'\nexclude = ['a']\nprofiles = ['work']\n"));
+    e.ok(&["--profile", "work", "sync"]);
+    let lock = fs::read(e.config("skills.lock")).unwrap();
+    fs::remove_dir_all(e.remote("group")).unwrap();
+    e.ok(&["sync"]);
+    assert!(!e.codex("b").exists());
+    assert_eq!(fs::read(e.config("skills.lock")).unwrap(), lock);
+    e.ok(&["--profile", "work", "sync", "--locked"]);
+    assert!(e.codex("b").exists());
+    assert!(!e.codex("a").exists());
+}
+
+#[test]
+fn remove_undiscovered_wildcard_override_handles_inline_tables() {
+    let e = Env::new();
+    let url = e.repo("group", &[("a", "a"), ("b", "b")]);
+    e.write_manifest(&format!("# inline declarations\nrepositories = {{ tools = {{ source = '{url}', skills = '*' }} }}\nskills = {{ a = {{ repository = 'tools' }} }}\n"));
+    let before = fs::read(e.config("skills.toml")).unwrap();
+    assert!(e.fails(&["remove", "b"]).contains("previous `skl sync`"));
+    assert_eq!(fs::read(e.config("skills.toml")).unwrap(), before);
+    e.ok(&["remove", "a"]);
+    let text = fs::read_to_string(e.config("skills.toml")).unwrap();
+    assert!(text.contains("# inline declarations"));
+    let doc: toml::Value = toml::from_str(&text).unwrap();
+    assert!(doc["skills"].as_table().unwrap().is_empty());
+    assert_eq!(
+        doc["repositories"]["tools"]["exclude"][0].as_str(),
+        Some("a")
+    );
+    assert!(!e.codex("a").exists());
+    assert!(e.codex("b").exists());
+}

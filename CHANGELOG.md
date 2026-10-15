@@ -6,6 +6,9 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- Exact-name exclusions for wildcard repository groups, with explicit overrides
+  and persistent exclusions when removing discovered wildcard skills.
+
 - `skl completions SHELL` generates shell completion scripts from the CLI definition
   on stdout without requiring configuration or changing installation state.
 
