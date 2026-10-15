@@ -614,3 +614,30 @@ missing; `doctor` fails when it finds any diagnostic; `list` fails for missing
 active links or undiscovered active Xcode wildcard imports. List retains its
 existing link-presence criteria; use doctor to check ownership and cache health.
 Excluded skills remain in list data but do not cause missing-link failures.
+
+### Source shortcuts
+
+`add` and `discover` accept `owner/repo@skill` and GitHub or GitLab tree URLs:
+
+```sh
+skl add vercel-labs/agent-skills@web-design-guidelines
+skl add https://github.com/owner/repo/tree/main/skills/review
+skl discover https://gitlab.com/group/project/-/tree/main/skills/review
+skl add owner/repo --ref main --subdir skills/review
+```
+
+Tree paths and `add --subdir` select the exact directory containing `SKILL.md`,
+including hidden directories; use `--subdir .` for the repository root. The
+manifest stores the repository, ref, and directory separately, so subsequent
+syncs and updates use the same selection. `@skill` selects by skill or directory
+name and cannot be combined with a different `--skill` or with `--all`.
+
+A tree URL normally uses the first segment after `tree/` as its ref. If an
+advertised branch or tag containing slashes also matches the URL, skl asks for
+an explicit `--ref` rather than guessing. For example, append
+`--ref feature/topic` to a URL ending in `tree/feature/topic/skills/review`.
+Explicit refs must match the URL; an explicit directory must agree with its
+path. To override either, use the repository URL with `--ref` and `--subdir`.
+Tree URLs with percent escapes, fragments, or query strings are rejected with
+instructions to use those flags. Ordinary git URLs, SSH credentials and private
+repository authentication continue to pass through to git unchanged.

@@ -60,6 +60,33 @@ impl Git {
         }
     }
 
+    /// A tree URL cannot distinguish slash-containing refs from directories.
+    pub fn check_tree_ref(&self, url: &str, tail: &str) -> Result<()> {
+        let refs = run(git().args(["ls-remote", "--heads", "--tags", url]))?;
+        for line in refs.lines() {
+            let Some((_, name)) = line.split_once('\t') else {
+                continue;
+            };
+            let Some(name) = name
+                .strip_prefix("refs/heads/")
+                .or_else(|| name.strip_prefix("refs/tags/"))
+            else {
+                continue;
+            };
+            if name.contains('/')
+                && (tail == name
+                    || tail
+                        .strip_prefix(name)
+                        .is_some_and(|rest| rest.starts_with('/')))
+            {
+                bail!(
+                    "tree URL may refer to `{name}`; specify --ref explicitly to separate the ref from the skill directory"
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Makes sure the commit is in the local cache, fetching only that commit when the
     /// remote allows it.
     pub fn ensure_commit(&self, url: &str, commit: &str) -> Result<PathBuf> {
@@ -106,6 +133,15 @@ impl Git {
     }
 
     pub fn candidates(&self, repo: &Path, commit: &str) -> Result<Vec<Candidate>> {
+        self.candidates_in(repo, commit, None)
+    }
+
+    pub fn candidates_in(
+        &self,
+        repo: &Path,
+        commit: &str,
+        selected: Option<&str>,
+    ) -> Result<Vec<Candidate>> {
         let files = run(git()
             .arg("-C")
             .arg(repo)
@@ -127,6 +163,11 @@ impl Git {
             } else {
                 continue;
             };
+            if selected
+                .is_some_and(|directory| (if directory == "." { "" } else { directory }) != subdir)
+            {
+                continue;
+            }
             let text = run(git().arg("-C").arg(repo).args([
                 "cat-file",
                 "-p",

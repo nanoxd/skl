@@ -4,12 +4,16 @@ use crate::{git::Git, manifest};
 
 /// Inspect a remote using disposable storage, independent of installed state.
 pub fn run(source: &str, git_ref: Option<&str>) -> Result<bool> {
-    let url = manifest::source_url(source)?;
+    let source = crate::source::Source::parse(source, git_ref, None)?;
+    let url = manifest::source_url(&source.repository)?;
     let temporary = tempfile::tempdir()?;
     let git = Git::new(temporary.path().join("repos"));
-    let commit = git.resolve(&url, git_ref)?;
+    let commit = source.resolve(&git, &url)?;
     let repo = git.ensure_commit(&url, &commit)?;
-    let mut candidates = git.candidates(&repo, &commit)?;
+    let mut candidates = git.candidates_in(&repo, &commit, source.subdir.as_deref())?;
+    if let Some(skill) = &source.skill {
+        candidates.retain(|c| &c.name == skill || &c.dir_name == skill);
+    }
     candidates.sort_by(|a, b| a.subdir.cmp(&b.subdir));
     println!("Source: {}", display(&url));
     println!("Commit: {commit}");

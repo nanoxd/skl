@@ -547,7 +547,11 @@ fn locate(
     let candidates = &cache[&key];
 
     let subdir = if let Some(dir) = &origin.subdir {
-        if !candidates.iter().any(|c| &c.subdir == dir) {
+        if git
+            .candidates_in(&repo, &commit, Some(dir))
+            .map_err(|e| format!("{e:#}"))?
+            .is_empty()
+        {
             return Err(format!("{} has no SKILL.md in `{dir}`", origin.source));
         }
         dir.clone()

@@ -255,9 +255,14 @@ fn parse_skill(name: &str, value: Value, default_agents: &[Agent], paths: &Paths
 
 fn git_origin(source: String, git_ref: Option<String>, subdir: Option<String>) -> Result<Origin> {
     let url = source_url(&source)?;
-    let subdir = subdir
-        .map(|s| s.trim_matches('/').to_string())
-        .filter(|s| !s.is_empty());
+    let subdir = subdir.and_then(|s| {
+        if s == "." {
+            Some(String::new())
+        } else {
+            let s = s.trim_matches('/');
+            (!s.is_empty()).then(|| s.to_string())
+        }
+    });
     if let Some(dir) = &subdir
         && dir.split('/').any(|part| part == ".." || part == ".")
     {
