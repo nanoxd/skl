@@ -1,7 +1,7 @@
 //! Offline, read-only installation diagnostics. Collection is separate from output.
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -183,7 +183,16 @@ pub fn collect(paths: &Paths, active: &Active) -> Result<Vec<Diagnostic>> {
             }
         };
         let skill_file = target.join("SKILL.md");
-        if !fs::symlink_metadata(&skill_file).is_ok_and(|m| m.file_type().is_file()) {
+        let metadata = if cached {
+            fs::symlink_metadata(&skill_file)
+        } else {
+            fs::metadata(&skill_file)
+        };
+        let readable = metadata.is_ok_and(|m| m.is_file())
+            && fs::File::open(&skill_file)
+                .and_then(|mut file| file.read(&mut [0; 1]))
+                .is_ok();
+        if !readable {
             issue(
                 &mut out,
                 if cached {
@@ -197,7 +206,7 @@ pub fn collect(paths: &Paths, active: &Active) -> Result<Vec<Diagnostic>> {
                 if cached {
                     "Restore the cached skill from a trusted copy, or move its skill directory aside and run skl sync to reinstall it."
                 } else {
-                    "Restore a regular SKILL.md at the configured local path, or correct the manifest path."
+                    "Restore a readable SKILL.md at the configured local path, check permissions, or correct the manifest path."
                 },
             );
         }
@@ -255,7 +264,7 @@ fn check_link(
             "Check permissions on the link and its parent directories.",
         ),
         Ok(_) => match fs::read_link(path) {
-            Ok(actual) if recorded == Some(&actual) => {
+            Ok(actual) if actual == desired || recorded == Some(&actual) => {
                 if actual != desired {
                     issue(
                         out,
@@ -272,7 +281,7 @@ fn check_link(
                         "broken-link",
                         skill,
                         Some(path.into()),
-                        "owned link target is missing or inaccessible".into(),
+                        "link target is missing or inaccessible".into(),
                         "Restore the skill target and check its permissions, then run skl sync.",
                     );
                 }

@@ -480,6 +480,6 @@ manifest contains private repository URLs or other sensitive configuration.
 required tools on PATH. It prints remedies and exits with status 1 when problems
 are found (0 when healthy). It never changes files, takes a run lock, invokes
 external tools, or contacts the network. It checks cached Xcode exports without
-exporting new skills. Unrecorded links remain conflicts even when their targets
-match the desired skill. Diagnostics describe a point-in-time view; rerun after
+exporting new skills. Matching user-created links remain healthy and unowned. Local `SKILL.md`
+symlinks are accepted; cached Git/Xcode skill files must be regular files. Diagnostics describe a point-in-time view; rerun after
 a concurrent sync finishes.

@@ -1888,7 +1888,7 @@ fn doctor_is_read_only_and_filters_inactive_skills() {
 }
 
 #[test]
-fn doctor_distinguishes_user_links_even_when_target_is_correct() {
+fn doctor_accepts_matching_user_links_without_claiming_ownership() {
     let env = Env::new();
     write_skill(&env.home.join("local"), "local", "v1");
     env.write_manifest("[skills]\nlocal = { path = '~/local' }\n");
@@ -1897,8 +1897,8 @@ fn doctor_distinguishes_user_links_even_when_target_is_correct() {
     let state = env.home.join(".local/share/skl/state.toml");
     fs::remove_file(&state).unwrap();
     let out = env.skl(&["doctor"]);
-    assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stdout).contains("link-conflict"));
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("No problems found"));
     assert!(!state.exists());
     assert_eq!(
         fs::read_link(env.codex("local")).unwrap(),
@@ -2042,4 +2042,37 @@ fn doctor_allows_retained_git_lock_for_inactive_local_replacement() {
             .contains("[skills.example]")
     );
     assert!(env.ok(&["doctor"]).contains("No problems found"));
+}
+
+#[test]
+fn doctor_accepts_readable_local_skill_symlinks() {
+    let env = Env::new();
+    write_skill(&env.home.join("local"), "local", "v1");
+    fs::rename(
+        env.home.join("local/SKILL.md"),
+        env.home.join("local/content.md"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink("content.md", env.home.join("local/SKILL.md")).unwrap();
+    env.write_manifest("[skills]\nlocal = { path = '~/local' }\n");
+    env.ok(&["sync"]);
+    assert!(env.ok(&["doctor"]).contains("No problems found"));
+}
+
+#[test]
+fn doctor_reports_unreadable_local_skill_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = Env::new();
+    write_skill(&env.home.join("local"), "local", "v1");
+    env.write_manifest("[skills]\nlocal = { path = '~/local' }\n");
+    env.ok(&["sync"]);
+    let file = env.home.join("local/SKILL.md");
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+    // Root can read mode-000 files; only assert failure when the process cannot.
+    if fs::File::open(&file).is_err() {
+        let out = env.skl(&["doctor"]);
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stdout).contains("unreadable"));
+    }
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
 }
