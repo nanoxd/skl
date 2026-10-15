@@ -106,6 +106,60 @@ conflicts at the new root: use `skl --project . sync --locked --force` to back
 them up and rebuild them. Old project caches are retained and can be removed
 manually once no longer needed.
 
+## Repository groups
+
+Declare a repository once and select several skills by their discovered names:
+
+```toml
+[repositories.team]
+source = "example/agent-skills"
+ref = "main"
+skills = ["review", "testing"]
+agents = ["codex"]
+profiles = ["work"]
+
+[skills]
+# Overrides replace this group's defaults for this skill.
+review = { repository = "team", ref = "v2.0.0", agents = ["claude-code", "codex"] }
+# Aliases also work for skills not included in the group's selection.
+notes = { repository = "team", subdir = "skills/notes" }
+```
+
+A repository supports `source`, `ref`, `skills`, `agents`, `profiles`, and `os`.
+Omit `skills` (or use `[]`) for an alias-only declaration. Its `agents`, `profiles`,
+and `os` defaults apply to every selected skill and alias reference; a per-skill
+value replaces the corresponding default. `repository` cannot be combined with
+`source` or `path`. Edit group declarations in `skills.toml`; `configure` and
+`remove` operate on explicit `[skills]` entries.
+
+Use `skills = "*"` to keep tracking a whole repository. Ordinary `sync` and
+`update` discover its current membership: newly discovered skills are added,
+removed skills are pruned, and existing skills keep their commit pins until
+updated. `update NAME` refreshes that skill's pin while still reconciling wildcard
+membership. Discovery follows the group's ref; a per-skill ref override only
+changes that skill's content. Explicit alias references remain selected even if
+the skill disappears from the wildcard membership.
+
+The lock records complete wildcard membership, including an empty repository.
+`sync --locked` uses that snapshot without contacting the remote for discovery;
+a populated store needs no network. A fresh machine may still fetch pinned
+content. Missing coverage, changed source/ref, and changing/removing a wildcard
+declaration require an ordinary sync first. Disabled groups retain their lock
+and cached content across profiles and operating systems. Read-only commands use
+the cached membership and report missing or stale coverage.
+
+Names must be unique across groups, explicit sources, and Xcode imports. To
+customize a generated skill, declare the same name with `repository` pointing to
+that group. Ambiguous duplicate names inside a wildcard repository are errors;
+use an explicit selection and `subdir` instead. Discovery failures and collisions
+abort before changing the installation. Failed individual fetches or unpacks
+retain their previous pin and links. `--dry-run` discovers in a temporary cache
+without publishing lock/state/store/link changes.
+
+Saved update plans support explicit selections and alias references. Wildcard
+groups currently require ordinary `update`; plan/apply reject them rather than
+silently rediscovering membership after review.
+
 ## Manifest
 
 `~/.config/skl/skills.toml`:
@@ -434,7 +488,8 @@ out of your dotfiles. `skl profile set` replaces any earlier setting and takes e
 on the next sync. `skl profile` prints the active profiles and where they came from.
 
 A skill outside the active profiles isn't installed, links `skl` made for it are
-removed, and its files leave the store. Its lock entry is left as it is, and
+removed, while its locked files and repository cache remain available for offline
+reactivation. Its lock entry is left as it is, and
 `skl update` skips it (naming it explicitly is an error), so machines with different
 profiles share one `skills.lock` without rewriting each other's entries. `skl list`
 shows such skills as `(only for <profiles>)`.

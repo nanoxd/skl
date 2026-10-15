@@ -3425,3 +3425,233 @@ fn project_agent_detection_does_not_infer_global_or_shared_harnesses() {
     assert!(!project.join("skills.toml").exists());
     assert!(!env.home.join(".local/share/skl").exists());
 }
+
+#[test]
+fn repository_groups_select_skills_and_inherit_overridable_defaults() {
+    let e = Env::new();
+    let url = e.repo("group", &[("a", "a"), ("b", "b")]);
+    git(&e.remote("group"), &["tag", "v1"]);
+    write_skill(&e.remote("group").join("b"), "b", "new b");
+    commit(&e.remote("group"), "new b");
+    e.write_manifest(&format!("[repositories.tools]\nsource = '{url}'\nref = 'v1'\nskills = ['a', 'b']\nagents = ['codex']\nprofiles = ['work']\n[skills]\nb = {{ repository = 'tools', ref = 'main', agents = ['claude-code'] }}\n"));
+    e.ok(&["--profile", "work", "sync"]);
+    assert!(e.codex("a").join("SKILL.md").is_file());
+    assert!(!e.claude("a").exists());
+    assert!(!e.codex("b").exists());
+    assert!(
+        fs::read_to_string(e.claude("b").join("SKILL.md"))
+            .unwrap()
+            .contains("new b")
+    );
+    let lock = fs::read_to_string(e.config("skills.lock")).unwrap();
+    assert!(lock.contains("ref = \"v1\""));
+    assert!(lock.contains("ref = \"main\""));
+    e.ok(&["--profile", "work", "sync", "--locked"]);
+    e.ok(&["sync"]);
+    assert!(!e.codex("a").exists());
+    assert!(!e.claude("b").exists());
+    assert_eq!(fs::read_to_string(e.config("skills.lock")).unwrap(), lock);
+}
+
+#[test]
+fn repository_wildcard_sync_discovers_new_members_without_updating_existing_pins() {
+    let e = Env::new();
+    let url = e.repo("group", &[("a", "a")]);
+    e.write_manifest(&format!(
+        "[repositories.tools]\nsource = '{url}'\nskills = '*'\n"
+    ));
+    e.ok(&["sync"]);
+    let old_target = fs::read_link(e.codex("a")).unwrap();
+    write_skill(&e.remote("group").join("a"), "a", "new a");
+    write_skill(&e.remote("group").join("b"), "b", "new b");
+    commit(&e.remote("group"), "add b and update a");
+    e.ok(&["sync", "--locked"]);
+    assert!(!e.codex("b").exists());
+    e.ok(&["sync"]);
+    assert_eq!(fs::read_link(e.codex("a")).unwrap(), old_target);
+    assert!(e.codex("b").join("SKILL.md").is_file());
+    e.ok(&["update", "a"]);
+    assert_ne!(fs::read_link(e.codex("a")).unwrap(), old_target);
+    assert!(!old_target.exists());
+    let listing = e.ok(&["list", "--json"]);
+    assert!(listing.contains("\"git\""));
+    assert!(!listing.contains("\"Xcode\""));
+    e.ok(&["info", "b"]);
+    e.ok(&["doctor"]);
+}
+
+#[test]
+fn repository_wildcard_locked_is_offline_and_checks_coverage_declaration() {
+    let e = Env::new();
+    let url = e.repo("group", &[("a", "a")]);
+    let manifest = format!("[repositories.tools]\nsource = '{url}'\nskills = '*'\n");
+    e.write_manifest(&manifest);
+    assert!(e.fails(&["sync", "--locked"]).contains("coverage"));
+    e.ok(&["sync"]);
+    fs::remove_dir_all(e.remote("group")).unwrap();
+    let lock = fs::read(e.config("skills.lock")).unwrap();
+    e.ok(&["sync", "--locked"]);
+    e.ok(&["list"]);
+    e.ok(&["doctor"]);
+    assert_eq!(fs::read(e.config("skills.lock")).unwrap(), lock);
+    e.write_manifest(&format!("{manifest}ref = 'other'\n"));
+    assert!(
+        e.fails(&["sync", "--locked"])
+            .contains("coverage is out of date")
+    );
+    assert_eq!(fs::read(e.config("skills.lock")).unwrap(), lock);
+    e.write_manifest(&format!(
+        "[repositories.tools]\nsource = '{url}'\nskills = ['a']\n"
+    ));
+    assert!(e.fails(&["sync", "--locked"]).contains("removed wildcard"));
+}
+
+#[test]
+fn repository_discovery_failure_preserves_lock_links_and_store() {
+    let e = Env::new();
+    let url = e.repo("group", &[("a", "a")]);
+    e.write_manifest(&format!(
+        "[repositories.tools]\nsource = '{url}'\nskills = '*'\n"
+    ));
+    e.ok(&["sync"]);
+    let lock = fs::read(e.config("skills.lock")).unwrap();
+    let target = fs::read_link(e.codex("a")).unwrap();
+    // Ambiguous names fail the entire discovery, never publish partial coverage.
+    write_skill(&e.remote("group").join("duplicate"), "a", "duplicate");
+    commit(&e.remote("group"), "ambiguous skill");
+    assert!(e.fails(&["sync"]).contains("ambiguous"));
+    assert_eq!(fs::read(e.config("skills.lock")).unwrap(), lock);
+    assert_eq!(fs::read_link(e.codex("a")).unwrap(), target);
+    fs::remove_dir_all(e.remote("group")).unwrap();
+    assert!(e.fails(&["update"]).contains("previous install preserved"));
+    assert_eq!(fs::read(e.config("skills.lock")).unwrap(), lock);
+    assert!(target.join("SKILL.md").is_file());
+}
+
+#[test]
+fn repository_wildcards_filter_profiles_preserve_locks_and_reconcile_removed_members() {
+    let e = Env::new();
+    let url = e.repo("group", &[("a", "a"), ("b", "b")]);
+    e.write_manifest(&format!("[repositories.tools]\nsource = '{url}'\nskills = '*'\nprofiles = ['work']\nagents = ['codex']\n"));
+    e.ok(&["sync"]);
+    assert!(!e.codex("a").exists());
+    e.ok(&["--profile", "work", "sync"]);
+    let lock = fs::read(e.config("skills.lock")).unwrap();
+    let a_target = fs::read_link(e.codex("a")).unwrap();
+    assert!(!e.claude("a").exists());
+    e.ok(&["sync", "--locked"]);
+    assert_eq!(fs::read(e.config("skills.lock")).unwrap(), lock);
+    assert!(!e.codex("a").exists());
+    assert!(a_target.exists());
+    let offline = e.remotes.join("offline");
+    fs::rename(e.remote("group"), &offline).unwrap();
+    e.ok(&["--profile", "work", "sync", "--locked"]);
+    assert!(e.codex("a").join("SKILL.md").is_file());
+    fs::rename(&offline, e.remote("group")).unwrap();
+    fs::remove_dir_all(e.remote("group").join("b")).unwrap();
+    commit(&e.remote("group"), "remove b");
+    e.ok(&["--profile", "work", "sync"]);
+    assert!(e.codex("a").exists());
+    assert!(!e.codex("b").exists());
+    e.write_manifest("[skills]\n");
+    e.ok(&["sync"]);
+    assert!(!e.codex("a").exists());
+    assert!(!a_target.exists());
+}
+
+#[test]
+fn repository_groups_detect_collisions_and_allow_explicit_same_group_overrides() {
+    let e = Env::new();
+    let url = e.repo("group", &[("a", "a")]);
+    e.write_manifest(&format!(
+        "[repositories.tools]\nsource = '{url}'\nskills = '*'\n[skills]\na = '{url}'\n"
+    ));
+    assert!(e.fails(&["sync"]).contains("conflicts"));
+    assert!(!e.config("skills.lock").exists());
+    assert!(!e.codex("a").exists());
+    e.write_manifest(&format!("[repositories.tools]\nsource = '{url}'\nskills = '*'\n[skills]\na = {{ repository = 'tools', agents = ['claude-code'] }}\n"));
+    e.ok(&["sync"]);
+    assert!(e.claude("a").exists());
+    assert!(!e.codex("a").exists());
+    e.ok(&["sync", "--locked"]);
+}
+
+#[test]
+fn repository_wildcard_dry_run_and_uncached_inspection_are_read_only() {
+    let e = Env::new();
+    let url = e.repo("group", &[("a", "a")]);
+    e.write_manifest(&format!(
+        "[repositories.tools]\nsource = '{url}'\nskills = '*'\n"
+    ));
+    let output = e.skl(&["list", "--json"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("repository-not-locked"));
+    e.ok(&["sync", "--dry-run"]);
+    assert!(!e.config("skills.lock").exists());
+    assert!(!e.home.join(".local/share/skl").exists());
+    assert!(!e.codex("a").exists());
+    let plan = e.home.join("plan.toml");
+    assert!(
+        e.fails(&["update", "--plan", plan.to_str().unwrap()])
+            .contains("wildcard repositories")
+    );
+    assert!(!plan.exists());
+}
+
+#[test]
+fn repository_wildcard_empty_selection_has_offline_coverage() {
+    let e = Env::new();
+    let url = e.repo("group", &[("a", "a")]);
+    fs::remove_dir_all(e.remote("group").join("a")).unwrap();
+    commit(&e.remote("group"), "empty collection");
+    e.write_manifest(&format!(
+        "[repositories.tools]\nsource = '{url}'\nskills = '*'\n"
+    ));
+    e.ok(&["sync"]);
+    let repos = e.home.join(".local/share/skl/repos");
+    let cached = fs::read_dir(&repos)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert!(cached.join("HEAD").is_file());
+    fs::remove_dir_all(e.remote("group")).unwrap();
+    e.ok(&["sync", "--locked"]);
+    e.ok(&["doctor"]);
+    assert!(cached.join("HEAD").is_file());
+    e.write_manifest("[skills]\n");
+    e.ok(&["sync"]);
+    assert!(!cached.exists());
+}
+
+#[test]
+fn repository_alias_only_supports_saved_plans_and_rejects_invalid_options() {
+    let e = Env::new();
+    let url = e.repo("group", &[("a", "a")]);
+    e.write_manifest(&format!(
+        "[repositories.tools]\nsource = '{url}'\n[skills]\na = {{ repository = 'tools' }}\n"
+    ));
+    e.ok(&["sync"]);
+    write_skill(&e.remote("group").join("a"), "a", "new a");
+    commit(&e.remote("group"), "new a");
+    let plan = e.home.join("plan.toml");
+    e.ok(&["update", "--plan", plan.to_str().unwrap()]);
+    e.ok(&["update", "--apply-plan", plan.to_str().unwrap()]);
+    assert!(body(&e.codex("a")).contains("new a"));
+    for invalid in [
+        "[repositories.tools]\nsource = 'a/b'\nskills = 42\n",
+        "[repositories.tools]\npath = 'local'\n",
+        "[repositories.tools]\nsource = 'a/b'\nos = ['unknown']\n",
+        "[repositories.tools]\nsource = 'a/b'\n[skills]\na = { repository = 'missing' }\n",
+        "[repositories.tools]\nsource = 'a/b'\n[skills]\na = { repository = 'tools', source = 'a/c' }\n",
+    ] {
+        e.write_manifest(invalid);
+        e.fails(&["sync"]);
+    }
+    e.write_manifest(&format!(
+        "[repositories.tools]\nsource = 'file:///unavailable'\nskills = '*'\nos = ['{}']\n",
+        other_os()
+    ));
+    e.ok(&["sync"]);
+}

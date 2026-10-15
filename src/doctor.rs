@@ -53,9 +53,20 @@ pub fn collect(paths: &Paths, active: &Active) -> Result<Vec<Diagnostic>> {
     let lock = Lock::load(&paths.lock()).context(
         "check skills.lock; restore a valid lockfile from dotfiles before running doctor again",
     )?;
+    crate::repositories::append(paths, &mut manifest, &lock.repositories)?;
     let recorded = sync::owned_links(paths)
         .context("check state.toml; restore a valid state file before running doctor again")?;
     let mut out = Vec::new();
+    for alias in crate::repositories::pending(paths, &manifest, &lock.repositories, active)? {
+        issue(
+            &mut out,
+            "repository-not-locked",
+            None,
+            Some(paths.lock()),
+            format!("repository `{alias}` wildcard coverage is missing or stale"),
+            "Run skl sync to discover the repository skills.",
+        );
+    }
     for name in lock.skills.keys() {
         if !manifest.skills.iter().any(|skill| {
             skill.name == *name

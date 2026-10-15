@@ -91,11 +91,20 @@ pub fn doctor(paths: &Paths, active: &Active) -> Result<bool> {
 
 pub fn list(paths: &Paths, active: &Active) -> Result<bool> {
     let mut manifest = manifest::load(paths)?;
-    let explicit: BTreeSet<_> = manifest.skills.iter().map(|s| s.name.clone()).collect();
     let lock = Lock::load(&paths.lock())?;
     let records = sync::owned_links(paths)?;
+    crate::repositories::append(paths, &mut manifest, &lock.repositories)?;
+    let explicit: BTreeSet<_> = manifest.skills.iter().map(|s| s.name.clone()).collect();
     xcode::append_skills(paths, &mut manifest, &lock.xcode)?;
     let mut diagnostics = vec![];
+    for alias in crate::repositories::pending(paths, &manifest, &lock.repositories, active)? {
+        diagnostics.push(json!({
+            "code": "repository-not-locked", "severity": "error", "skill": null,
+            "path": path_value(&paths.lock())?,
+            "message": format!("repository `{alias}` wildcard coverage is missing or stale"),
+            "remedy": "Run skl sync to discover the repository skills.",
+        }));
+    }
     if manifest.xcode.as_ref().is_some_and(|config| {
         config.skills.is_none() && !lock.xcode_all_complete && config.enabled(active)
     }) {

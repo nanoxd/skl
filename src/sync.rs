@@ -101,6 +101,57 @@ fn run_inner(
     let old_lock = Lock::load(&paths.lock())?;
     let mut out = Report::new(opts.dry_run);
 
+    // Discover before changing lock/store/links. Any failed or ambiguous group
+    // aborts the run, preserving the entire previous installation.
+    let mut repository_entries = BTreeMap::new();
+    let mut repository_commits = BTreeMap::new();
+    if opts.locked
+        && old_lock
+            .repositories
+            .keys()
+            .any(|alias| !manifest.repositories.contains_key(alias))
+    {
+        bail!(
+            "skills.lock contains removed wildcard repositories; run `skl sync` without --locked"
+        );
+    }
+    for (alias, group) in &manifest.repositories {
+        let options = group.skill(alias, &manifest.agents, paths)?;
+        if !options.enabled(active) {
+            if let Some(old) = old_lock.repositories.get(alias) {
+                repository_entries.insert(alias.clone(), old.clone());
+            }
+            continue;
+        }
+        if opts.locked {
+            let old = old_lock.repositories.get(alias).with_context(|| {
+                format!(
+                    "repository `{alias}` has no wildcard coverage; run `skl sync` without --locked"
+                )
+            })?;
+            if !crate::repositories::matches(group, old, &manifest.agents, paths)? {
+                bail!(
+                    "repository `{alias}` wildcard coverage is out of date; run `skl sync` without --locked"
+                );
+            }
+            repository_entries.insert(alias.clone(), old.clone());
+        } else {
+            let (coverage, commit) =
+                crate::repositories::discover(git, group, &manifest.agents, paths).with_context(
+                    || format!("discovering repository `{alias}`; previous install preserved"),
+                )?;
+            repository_commits.insert(
+                (
+                    manifest::source_url(&coverage.source)?,
+                    coverage.git_ref.clone(),
+                ),
+                commit,
+            );
+            repository_entries.insert(alias.clone(), coverage);
+        }
+    }
+    crate::repositories::append(paths, &mut manifest, &repository_entries)?;
+
     let mut xcode_entries = BTreeMap::new();
     let mut xcode_all_complete = false;
     if let Some(config) = &manifest.xcode {
@@ -259,7 +310,10 @@ fn run_inner(
         .iter()
         .cloned()
         .zip(par_map(&refs, |(url, r)| {
-            git.resolve(url, r.as_deref()).map_err(|e| format!("{e:#}"))
+            match repository_commits.get(&(url.clone(), r.clone())) {
+                Some(commit) => Ok(commit.clone()),
+                None => git.resolve(url, r.as_deref()).map_err(|e| format!("{e:#}")),
+            }
         }))
         .collect();
 
@@ -300,6 +354,7 @@ fn run_inner(
     // network never drops it.
     let mut lock = Lock {
         version: old_lock.version,
+        repositories: repository_entries,
         xcode_all_complete,
         xcode: xcode_entries,
         skills: manifest
@@ -487,13 +542,7 @@ fn run_inner(
             lock.save(&paths.lock())?;
         }
         state.save(&paths.state())?;
-        let inactive: BTreeSet<&str> = manifest
-            .skills
-            .iter()
-            .filter(|s| !enabled(s))
-            .map(|s| s.name.as_str())
-            .collect();
-        collect_garbage(paths, &lock, &inactive, &state)?;
+        collect_garbage(paths, &lock, &state)?;
     }
     Ok((out.finish(manifest.skills.len()), lock))
 }
@@ -805,26 +854,18 @@ fn reconcile(
 /// Drops store commits and repo caches that neither the lock nor any owned link uses.
 /// Sources come from the lock itself, so a skill kept on its old install after a
 /// failed change of source keeps its files.
-fn collect_garbage(
-    paths: &Paths,
-    lock: &Lock,
-    inactive: &BTreeSet<&str>,
-    state: &State,
-) -> Result<()> {
+fn collect_garbage(paths: &Paths, lock: &Lock, state: &State) -> Result<()> {
     let store = paths.store();
     let mut live: BTreeSet<(String, String)> = lock
         .skills
-        .iter()
-        .filter(|(name, _)| !inactive.contains(name.as_str()))
-        .filter_map(|(_, l)| {
+        .values()
+        .filter_map(|l| {
             let url = manifest::source_url(&l.source).ok()?;
             Some((git::cache_key(&url), l.commit.clone()))
         })
         .collect();
-    for (name, entry) in &lock.xcode {
-        if !inactive.contains(name.as_str()) {
-            live.insert(("xcode".into(), entry.digest.clone()));
-        }
+    for entry in lock.xcode.values() {
+        live.insert(("xcode".into(), entry.digest.clone()));
     }
     for link in &state.links {
         if let Ok(rest) = link.target.strip_prefix(&store) {
@@ -836,7 +877,14 @@ fn collect_garbage(
             }
         }
     }
-    let keys: BTreeSet<&String> = live.iter().map(|(key, _)| key).collect();
+    let mut keys: BTreeSet<String> = live.iter().map(|(key, _)| key.clone()).collect();
+    // A complete empty wildcard still references its repository cache even
+    // though it has no individual skills or store commits to keep alive.
+    keys.extend(lock.repositories.values().filter_map(|coverage| {
+        manifest::source_url(&coverage.source)
+            .ok()
+            .map(|url| git::cache_key(&url))
+    }));
 
     for repo in read_dirs(&store)? {
         let key = file_name(&repo);
@@ -850,7 +898,7 @@ fn collect_garbage(
         }
     }
     for repo in read_dirs(&paths.repos())? {
-        if !keys.contains(&file_name(&repo).trim_end_matches(".git").to_string()) {
+        if !keys.contains(file_name(&repo).trim_end_matches(".git")) {
             fs::remove_dir_all(&repo)?;
         }
     }
