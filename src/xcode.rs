@@ -49,6 +49,7 @@ pub fn append_skills(
             origin: Origin::Local(dir),
             agents: config.agents.clone(),
             profiles: config.profiles.clone(),
+            os: config.os.clone(),
         });
     }
     Ok(())
@@ -98,6 +99,10 @@ impl Export {
             version,
             skills,
         })
+    }
+
+    pub fn covers_all(&self, entries: &BTreeMap<String, XcodeSkill>) -> bool {
+        self.skills.keys().eq(entries.keys())
     }
 
     pub fn install(

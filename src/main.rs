@@ -333,11 +333,21 @@ fn list(paths: &Paths, active: &Active) -> Result<bool> {
     let mut healthy = true;
     if let Some(config) = &manifest.xcode
         && config.skills.is_none()
-        && lock.xcode.is_empty()
-        && active.includes(&config.profiles)
+        && !lock.xcode_all_complete
+        && config.enabled(active)
     {
         println!("Xcode: all skills selected; run `skl sync` to discover and export them");
         healthy = false;
+    }
+    if let Some(config) = &manifest.xcode
+        && config.skills.is_none()
+        && lock.xcode.is_empty()
+        && !manifest::matches_os(&config.os)
+    {
+        println!(
+            "Xcode: all skills selected (only on {})",
+            config.os.join(", ")
+        );
     }
     for skill in &manifest.skills {
         let (origin, version) = match &skill.origin {
@@ -364,7 +374,9 @@ fn list(paths: &Paths, active: &Active) -> Result<bool> {
                 _ => (paths.tilde(dir), "local".to_string()),
             },
         };
-        let status = if !active.includes(&skill.profiles) {
+        let status = if !manifest::matches_os(&skill.os) {
+            format!("  (only on {})", skill.os.join(", "))
+        } else if !active.includes(&skill.profiles) {
             format!("  (only for {})", skill.profiles.join(", "))
         } else {
             let missing: Vec<&str> = skill

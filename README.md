@@ -81,6 +81,7 @@ A skill entry is either a source string or a table with these keys:
 | `path`     | A local skill directory, linked in place                                 |
 | `agents`   | Agents for this skill, replacing the top-level list                      |
 | `profiles` | Non-empty list of profiles for this skill. Unset means every machine     |
+| `os`       | Non-empty list of `macos` and/or `linux`. Unset means either OS           |
 
 Set exactly one of `source` or `path`. `ref` and `subdir` only apply to `source`.
 A `source` can be:
@@ -120,6 +121,7 @@ skills = "*"
 # Optional: restrict agents or machines
 # agents = ["codex"]
 # profiles = ["mac"]
+# os = ["macos"] # default for Xcode imports
 ```
 
 Run `skl sync`, then `skl list` to see the exported names. To keep only particular
@@ -135,7 +137,9 @@ name. They must be unique and cannot overlap names in `[skills]`. Set `skills = 
 or remove `[xcode]` to uninstall the managed Xcode skills. Selection is currently
 configured by editing this section; `skl add` and `skl remove` manage `[skills]`.
 
-Xcode must be installed, selected, and fully set up. `skl` runs
+Xcode imports default to `os = ["macos"]`, so Linux machines skip exporting and
+linking them while preserving their lock entries. Xcode must be installed,
+selected, and fully set up on the Mac. `skl` runs
 `xcrun agent skills export <staging-directory>`, discovers the exported skills,
 and publishes selected snapshots into its store before linking them into agents.
 It never exports directly into an agent's directory. An existing manual Xcode
@@ -153,7 +157,10 @@ The lockfile records each skill's Xcode version/build and SHA-256 content digest
 This is provenance: another machine exporting from another Xcode version may
 produce different content and update these entries. Unlike git commits, Xcode
 exports cannot be downloaded from the lockfile. `sync --locked` uses only existing
-cached snapshots and fails if the selection or cache needs updating. It does not
+cached snapshots and fails if the selection or cache needs updating. Wildcard coverage
+is recorded separately: changing a named subset to `"*"` requires a normal sync
+before `--locked` can succeed. Older locks without coverage metadata also require
+one normal sync for wildcard imports. It does not
 invoke Xcode or check whether the installed Xcode has changed. `--dry-run` describes
 the export without invoking it; additions and content changes cannot be previewed
 until an export runs. `--patch` remains specific to git skills.
@@ -250,6 +257,28 @@ This fits a bootstrap script that already tells machines apart. If it sets
 skl profile set "$MACHINE_PROFILE"
 skl sync
 ```
+
+## Operating systems
+
+Use `os` to install a skill only on particular operating systems:
+
+```toml
+[skills]
+mac-tools = { source = "example/mac-tools", os = ["macos"] }
+linux-tools = { path = "~/dev/linux-tools", os = ["linux"] }
+work-tools = { source = "example/work-tools", os = ["macos"], profiles = ["work"] }
+```
+
+Accepted values are `macos` and `linux`. Git and local skills without `os` apply
+on either OS; `[xcode]` defaults to `os = ["macos"]`. When both `os` and `profiles`
+are specified, both must match. `skl list` labels OS-excluded skills with
+`(only on ...)`.
+
+Excluded skills are not fetched, exported, or linked. Previously managed links
+are removed using the normal ownership rules, and unused cached files can be
+collected, while lock entries remain unchanged for other machines. Explicitly
+updating an OS-excluded skill reports an error. Configure these filters in the
+manifest; no machine-specific profile setup is required for OS detection.
 
 ## Reviewing updates
 

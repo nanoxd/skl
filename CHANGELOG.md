@@ -11,7 +11,10 @@ All notable changes to this project are documented here.
   Sync records Xcode version/build and content hashes, preserves previous installs
   when exports fail or selected skills disappear, and normalizes frontmatter field
   order to avoid spurious updates. Dry runs skip exporting; `--locked` reuses cached
-  snapshots without invoking Xcode.
+  snapshots without invoking Xcode and requires verified wildcard coverage.
+- Operating-system filters via `os = ["macos"]` or `os = ["linux"]` for skills
+  and Xcode imports, combined with profiles. Xcode imports default to macOS;
+  excluded skills keep their lock entries and have managed links removed.
 - Linux ARM64 (glibc) release binaries and CI coverage.
 
 ### Fixed
