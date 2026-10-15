@@ -1,6 +1,8 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
 
@@ -8,6 +10,7 @@ use anyhow::{Context, Result, bail};
 /// as everything else on the machine.
 pub struct Git {
     repos: PathBuf,
+    fetch_locks: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
 }
 
 /// A directory in a repo that holds a SKILL.md.
@@ -21,7 +24,10 @@ pub struct Candidate {
 
 impl Git {
     pub fn new(repos: PathBuf) -> Self {
-        Self { repos }
+        Self {
+            repos,
+            fetch_locks: Mutex::new(BTreeMap::new()),
+        }
     }
 
     pub fn repo_dir(&self, url: &str) -> PathBuf {
@@ -90,6 +96,16 @@ impl Git {
     /// Makes sure the commit is in the local cache, fetching only that commit when the
     /// remote allows it.
     pub fn ensure_commit(&self, url: &str, commit: &str) -> Result<PathBuf> {
+        // Different commits of one repository share a bare cache. Serialize its
+        // initialization and fetches, while unrelated repositories stay parallel.
+        let guard = self
+            .fetch_locks
+            .lock()
+            .unwrap()
+            .entry(cache_key(url))
+            .or_default()
+            .clone();
+        let _guard = guard.lock().unwrap();
         let repo = self.repo_dir(url);
         if !repo.join("HEAD").exists() {
             fs::create_dir_all(&self.repos)?;
