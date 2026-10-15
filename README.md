@@ -224,6 +224,7 @@ skl add owner/repo --no-sync       # only edit the manifest
 
 skl remove notes             # remove from the manifest and unlink
 
+skl info review              # provenance, selection rules, content and link ownership
 skl list                     # skills, locked commits, missing links, unmanaged skills
 
 skl profile                  # show the active profiles and where they came from
@@ -235,6 +236,20 @@ skl profile clear            # remove them
 
 `sync` and `list` exit non-zero when something needs attention, such as a conflict, a
 skill that failed to fetch, or a missing link.
+
+`skl info <name>` inspects a configured skill or an existing entry in configured
+agent directories. It shows manifest source and ref, full pinned commit and
+subdirectory (including stale lock entries), local paths or cached Xcode provenance,
+profile/OS selection reasons, and actual versus recorded link targets. A link is
+owned only when its target still matches the state file. Old recorded destinations
+are shown too, even after the configured agents change.
+
+`info` is read-only: it takes no run lock, fetches nothing, invokes no Xcode export,
+and creates no files. Exit 0 means the skill was found and inspected, even if it is
+excluded, missing content, unlocked, or has conflicts. Unknown names, invalid
+arguments, and unreadable or malformed metadata exit non-zero. Xcode wildcard
+names become known after a successful sync; explicitly selected names can be
+inspected before export. Unmanaged entries can be inspected even without a manifest.
 
 `skl list` ends with a "Not managed by skl" section: every entry in each agent's
 skills directory that `skl` doesn't own, such as skills an app installed or leftovers
