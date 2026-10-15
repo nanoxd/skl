@@ -1,0 +1,13 @@
+title: skl
+description: Keep agent skills in sync across coding agents and machines.
+url: https://nanoxd.github.io
+baseurl: /skl
+repository: nanoxd/skl
+theme: jekyll-theme-primer
+plugins:
+  - jekyll-relative-links
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: default
