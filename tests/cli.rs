@@ -1413,3 +1413,118 @@ fn release_saves_to_advanced_branch_and_reruns_without_duplicate_commits() {
         assert_eq!(git(&checkout, &["rev-parse", "v0.2.0"]), tagged);
     }
 }
+
+#[test]
+fn agent_defaults_preserve_manifest_and_apply_on_sync() {
+    let env = Env::new();
+    write_skill(&env.home.join("local"), "demo", "v1");
+    env.write_manifest("# keep this comment\n[skills]\ndemo = { path = '~/local' }\nonly-codex = { path = '~/local', agents = ['codex'] }\n");
+    env.ok(&["sync"]);
+    let original = fs::read_to_string(env.config("skills.toml")).unwrap();
+    assert!(
+        env.fails(&["agents", "set", "cursor", "typo-agent"])
+            .contains("unknown agent")
+    );
+    assert_eq!(
+        fs::read_to_string(env.config("skills.toml")).unwrap(),
+        original
+    );
+    env.ok(&["agents", "set", "cursor", "opencode", "cursor"]);
+    assert!(env.claude("demo").is_symlink()); // Setting alone does not sync.
+    let text = fs::read_to_string(env.config("skills.toml")).unwrap();
+    assert!(text.contains("# keep this comment"));
+    assert!(text.contains("agents = ['codex']"));
+    assert!(env.ok(&["agents"]).contains("cursor, opencode"));
+    env.ok(&["sync"]);
+    assert!(!env.claude("demo").exists());
+    assert!(!env.codex("demo").exists());
+    assert!(env.codex("only-codex").is_symlink());
+    assert!(env.home.join(".cursor/skills/demo").is_symlink());
+    assert!(env.home.join(".config/opencode/skills/demo").is_symlink());
+    env.ok(&["agents", "reset"]);
+    env.ok(&["sync"]);
+    assert!(env.claude("demo").is_symlink());
+    assert!(!env.home.join(".cursor/skills/demo").exists());
+}
+
+#[test]
+fn all_named_agents_sync_and_shared_directories_remain_owned() {
+    let env = Env::new();
+    let listing = env.ok(&["agents", "list"]);
+    assert!(!env.home.join(".local/share/skl").exists());
+    let rows: Vec<_> = listing
+        .lines()
+        .map(|line| {
+            let mut parts = line.split_whitespace();
+            (parts.next().unwrap(), parts.next().unwrap())
+        })
+        .collect();
+    assert!(rows.len() >= 70);
+    write_skill(&env.home.join("local"), "demo", "v1");
+    env.write_manifest("[skills]\ndemo = { path = '~/local' }\n");
+    let mut args = vec!["agents", "set"];
+    args.extend(rows.iter().map(|(name, _)| *name));
+    env.ok(&args);
+    env.ok(&["sync"]);
+    for (_, path) in &rows {
+        assert!(
+            env.home
+                .join(path.strip_prefix("~/").unwrap())
+                .join("demo")
+                .is_symlink(),
+            "{path}"
+        );
+    }
+    env.ok(&["agents", "set", "cline", "codex", "warp"]);
+    env.ok(&["sync"]);
+    assert!(env.codex("demo").is_symlink());
+    env.ok(&["agents", "set", "codex"]);
+    env.ok(&["sync"]);
+    assert!(env.codex("demo").is_symlink());
+    assert!(!env.claude("demo").exists());
+}
+
+#[test]
+fn agent_defaults_support_custom_paths_and_symlinked_manifest() {
+    use std::os::unix::fs::symlink;
+    let env = Env::new();
+    env.write_manifest("# dotfiles\n[skills]\n");
+    let dotfile = env.home.join("dotfile.toml");
+    fs::rename(env.config("skills.toml"), &dotfile).unwrap();
+    symlink(&dotfile, env.config("skills.toml")).unwrap();
+    env.ok(&["agents", "set", "~/custom/skills"]);
+    assert!(env.config("skills.toml").is_symlink());
+    assert!(
+        fs::read_to_string(dotfile)
+            .unwrap()
+            .contains("~/custom/skills")
+    );
+    assert!(env.ok(&["agents"]).contains("~/custom/skills"));
+}
+
+#[test]
+fn xdg_agent_paths_resolve_without_changing_other_harnesses() {
+    let env = Env::new();
+    let config = env.home.join("config-override");
+    let out = env.skl_with_env(
+        &["agents", "list"],
+        &[("XDG_CONFIG_HOME", config.as_os_str())],
+    );
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.lines().any(|l| l.starts_with("opencode ") && l.ends_with("~/config-override/opencode/skills")));
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("codex ") && l.ends_with("~/.agents/skills"))
+    );
+    let out = env.skl_with_env(
+        &["agents", "list"],
+        &[("XDG_CONFIG_HOME", std::ffi::OsStr::new("relative"))],
+    );
+    assert!(
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .any(|l| l.starts_with("opencode ") && l.ends_with("~/.config/opencode/skills"))
+    );
+}

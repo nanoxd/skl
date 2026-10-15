@@ -100,15 +100,33 @@ Copies inside hidden directories, such as a tool-specific mirror, are ignored wh
 another copy. If the name is ambiguous, `skl` asks you to set `subdir`.
 
 Skill names may contain letters, digits, `-`, `_` and `.`, and become the directory
-name in each agent. The agents are:
+name in each agent. Run `skl agents list` to see every supported harness and its
+resolved global skills directory. The registry includes Claude Code, Codex, Cursor,
+GitHub Copilot, Gemini CLI, OpenCode, Windsurf, Cline, Roo, Kilo, Amp, Goose,
+Continue, Droid, Kiro, Pi, and many more, using the global paths from the
+[Vercel skills registry](https://github.com/vercel-labs/skills/blob/main/src/agents.ts).
+Harnesses that only support project-local skills are excluded.
 
-| Agent         | Links into         |
-|---------------|--------------------|
-| `claude-code` | `~/.claude/skills` |
-| `codex`       | `~/.agents/skills` |
-| a path        | that directory     |
+```bash
+skl agents                              # Show the default list
+skl agents list                         # List supported harnesses and paths
+skl agents set claude-code cursor opencode
+skl sync                                # Apply the new selection
+skl agents reset                        # Restore Claude Code + Codex
+```
 
-Paths in `agents` must start with `~` or `/`.
+`set` writes the top-level `agents` array in `skills.toml`, preserving comments
+and per-skill overrides. This default list travels with your manifest in dotfiles.
+Changes take effect on the next sync; only links owned by skl are removed.
+Without an explicit list, the defaults remain `claude-code` and `codex`.
+Each skill's `agents` replaces the default list, and `agents = []` selects none.
+
+Custom directories are also accepted: `skl agents set claude-code ~/my-agent/skills`.
+Paths in the manifest's `agents` must start with `~` or `/`. Named harnesses use
+standard home directories; Amp, Devin, Goose, OpenCode, Replit and Universal honor
+an absolute `XDG_CONFIG_HOME`. For other harness-specific directory overrides, use
+an explicit path. Harnesses sharing a skills directory necessarily see the same
+skills, even when only one of them is selected.
 
 ## Xcode skills
 
