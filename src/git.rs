@@ -217,7 +217,7 @@ impl Git {
             "--summary",
         ]);
         if patch {
-            cmd.arg("--patch");
+            cmd.args(["--patch", "--binary", "--no-textconv"]);
         }
         run(cmd.args([old, new]))
     }

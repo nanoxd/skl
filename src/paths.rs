@@ -5,6 +5,7 @@ use anyhow::{Context, Result, ensure};
 use sha2::{Digest, Sha256};
 
 /// Every location skl reads or writes, resolved once from the environment.
+#[derive(Clone)]
 pub struct Paths {
     pub home: PathBuf,
     /// Explicit project root; absent for machine-wide installs.

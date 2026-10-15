@@ -19,6 +19,10 @@ All notable changes to this project are documented here.
 - `skl completions SHELL` generates shell completion scripts from the CLI definition
   on stdout without requiring configuration or changing installation state.
 
+- Saved update plans now snapshot wildcard repository membership and self-contained
+  Xcode content with full review diffs, verified hashes, and offline Xcode apply.
+  Version 2 plans also validate generated destinations and protect their output paths.
+
 - In-repository Homebrew formula for checksum-verified macOS and Linux release
   binaries on ARM64 and x86_64, with installation and update instructions.
 - Automatic Homebrew formula updates after stable tag releases, with archive

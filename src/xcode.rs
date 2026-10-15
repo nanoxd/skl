@@ -305,3 +305,189 @@ fn normalize_frontmatter(text: &str) -> String {
         fields.into_values().collect::<String>()
     )
 }
+
+/// Self-contained exported files, including directory and executable permissions.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Snapshot {
+    nodes: BTreeMap<String, Node>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Node {
+    mode: u32,
+    bytes: Option<Vec<u8>>,
+}
+
+impl Snapshot {
+    pub fn capture(root: &Path) -> Result<Self> {
+        if !fs::symlink_metadata(root)?.is_dir() {
+            bail!(
+                "Xcode snapshot root must be a directory: {}",
+                root.display()
+            );
+        }
+        fn visit(root: &Path, dir: &Path, nodes: &mut BTreeMap<String, Node>) -> Result<()> {
+            use std::os::unix::fs::PermissionsExt;
+            for path in children(dir)? {
+                let meta = fs::symlink_metadata(&path)?;
+                if meta.permissions().mode() & 0o7000 != 0 {
+                    bail!("special permissions in Xcode snapshot: {}", path.display());
+                }
+                if !meta.is_file() && !meta.is_dir() {
+                    bail!("unsupported file in Xcode snapshot: {}", path.display());
+                }
+                nodes.insert(
+                    path.strip_prefix(root)?
+                        .to_str()
+                        .context("non-UTF8 Xcode path")?
+                        .into(),
+                    Node {
+                        mode: meta.permissions().mode(),
+                        bytes: if meta.is_file() {
+                            Some(fs::read(&path)?)
+                        } else {
+                            None
+                        },
+                    },
+                );
+                if meta.is_dir() {
+                    visit(root, &path, nodes)?;
+                }
+            }
+            Ok(())
+        }
+        let mut nodes = BTreeMap::new();
+        visit(root, root, &mut nodes)?;
+        Ok(Self { nodes })
+    }
+
+    fn materialize(&self, root: &Path) -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        for (name, node) in &self.nodes {
+            if node.mode & 0o7000 != 0 {
+                bail!("special permissions in Xcode snapshot");
+            }
+            if name.is_empty() || name.split('/').any(|p| matches!(p, "" | "." | "..")) {
+                bail!("invalid Xcode snapshot path `{name}`");
+            }
+            let path = root.join(name);
+            if let Some(bytes) = &node.bytes {
+                fs::write(&path, bytes)?;
+            } else {
+                fs::create_dir(&path)?;
+            }
+        }
+        // Apply restrictive directory permissions only after writing descendants.
+        for (name, node) in self.nodes.iter().rev() {
+            fs::set_permissions(root.join(name), fs::Permissions::from_mode(node.mode))?;
+        }
+        if !fs::symlink_metadata(root.join("SKILL.md"))?.is_file() {
+            bail!("Xcode snapshot needs a regular SKILL.md");
+        }
+        Ok(())
+    }
+
+    pub fn verify(&self, entry: &XcodeSkill) -> Result<()> {
+        let stage = tempfile::tempdir()?;
+        self.materialize(stage.path())?;
+        if content_digest(stage.path())? != entry.digest {
+            bail!("Xcode snapshot digest mismatch");
+        }
+        Ok(())
+    }
+
+    pub fn install(&self, paths: &Paths, name: &str, entry: &XcodeSkill) -> Result<()> {
+        self.verify(entry)?;
+        let dest = skill_dir(paths, name, entry);
+        if let Ok(meta) = fs::symlink_metadata(&dest) {
+            if !meta.is_dir() {
+                bail!(
+                    "cached Xcode snapshot must be a directory: {}",
+                    dest.display()
+                );
+            }
+            if content_digest(&dest)? != entry.digest {
+                bail!("cached Xcode snapshot digest mismatch for `{name}`");
+            }
+            return Ok(());
+        }
+        let parent = dest.parent().unwrap();
+        fs::create_dir_all(parent)?;
+        let stage = tempfile::tempdir_in(parent)?;
+        self.materialize(stage.path())?;
+        fs::rename(stage.path(), dest)?;
+        Ok(())
+    }
+
+    pub fn review(&self, previous: Option<&Path>, reverse: bool) -> Result<String> {
+        let stage = tempfile::tempdir()?;
+        let before = stage.path().join("before");
+        let after = stage.path().join("after");
+        fs::create_dir(&before)?;
+        fs::create_dir(&after)?;
+        if let Some(previous) = previous {
+            copy_tree(previous, &before)?;
+        }
+        self.materialize(&after)?;
+        let mut command = Command::new("git");
+        command.arg("diff");
+        if reverse {
+            command.arg("-R");
+        }
+        let output = command
+            .args([
+                "--no-index",
+                "--binary",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--",
+                "before",
+                "after",
+            ])
+            .current_dir(stage.path())
+            .output()?;
+        if !matches!(output.status.code(), Some(0 | 1)) {
+            bail!(
+                "reviewing Xcode snapshot: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(String::from_utf8(output.stdout)?)
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn snapshots_validate_paths_modes_content_and_roots() {
+        let entry = XcodeSkill {
+            version: "test".into(),
+            digest: "0".repeat(64),
+        };
+        for (name, mode, message) in [
+            ("../escape", 0o100644, "invalid Xcode snapshot path"),
+            ("/escape", 0o100644, "invalid Xcode snapshot path"),
+            ("SKILL.md", 0o104755, "special permissions"),
+            ("SKILL.md", 0o100644, "digest mismatch"),
+        ] {
+            let snapshot = Snapshot {
+                nodes: BTreeMap::from([(
+                    name.into(),
+                    Node {
+                        mode,
+                        bytes: Some(b"skill".to_vec()),
+                    },
+                )]),
+            };
+            assert!(format!("{:#}", snapshot.verify(&entry).unwrap_err()).contains(message));
+        }
+        let stage = tempfile::tempdir().unwrap();
+        fs::create_dir(stage.path().join("real")).unwrap();
+        std::os::unix::fs::symlink(stage.path().join("real"), stage.path().join("alias")).unwrap();
+        assert!(Snapshot::capture(&stage.path().join("alias")).is_err());
+    }
+}
