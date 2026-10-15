@@ -6,6 +6,12 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- Xcode skill imports through `xcrun agent skills export`: configure `[xcode]`
+  with `skills = "*"` or selected names, plus optional agents and profiles.
+  Sync records Xcode version/build and content hashes, preserves previous installs
+  when exports fail or selected skills disappear, and normalizes frontmatter field
+  order to avoid spurious updates. Dry runs skip exporting; `--locked` reuses cached
+  snapshots without invoking Xcode.
 - Linux ARM64 (glibc) release binaries and CI coverage.
 
 ### Fixed

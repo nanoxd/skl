@@ -22,6 +22,22 @@ pub struct Manifest {
     /// The agents skills link into unless they name their own.
     pub agents: Vec<Agent>,
     pub skills: Vec<Skill>,
+    pub xcode: Option<Xcode>,
+}
+
+pub struct Xcode {
+    /// None selects every exported skill.
+    pub skills: Option<Vec<String>>,
+    pub agents: Vec<Agent>,
+    pub profiles: Vec<String>,
+}
+
+impl Xcode {
+    pub fn selects(&self, name: &str) -> bool {
+        self.skills
+            .as_ref()
+            .is_none_or(|names| names.iter().any(|n| n == name))
+    }
 }
 
 pub struct Skill {
@@ -67,6 +83,45 @@ pub fn parse(text: &str, paths: &Paths) -> Result<Manifest> {
             .map(|id| agents::resolve(id, paths))
             .collect::<Result<_>>()?,
     };
+    let xcode = table
+        .remove("xcode")
+        .map(|value| -> Result<Xcode> {
+            let Value::Table(mut config) = value else {
+                bail!("`xcode` must be a table")
+            };
+            let skills = match config.remove("skills") {
+                Some(Value::String(s)) if s == "*" => None,
+                Some(Value::Array(items)) => {
+                    let mut names = Vec::new();
+                    for item in items {
+                        let Value::String(name) = item else {
+                            bail!("`xcode.skills` must contain names")
+                        };
+                        validate_name(&name)?;
+                        if !names.contains(&name) {
+                            names.push(name);
+                        }
+                    }
+                    Some(names)
+                }
+                _ => bail!("set `xcode.skills` to `\"*\"` or an array of names"),
+            };
+            if let Some(key) = config
+                .keys()
+                .find(|k| !matches!(k.as_str(), "agents" | "profiles"))
+            {
+                bail!("unknown xcode key `{key}`");
+            }
+            // Reuse per-skill agents and profiles validation.
+            config.insert("path".into(), Value::String(".".into()));
+            let options = parse_skill("xcode", Value::Table(config), &default_agents, paths)?;
+            Ok(Xcode {
+                skills,
+                agents: options.agents,
+                profiles: options.profiles,
+            })
+        })
+        .transpose()?;
     let skills = match table.remove("skills") {
         Some(Value::Table(skills)) => skills,
         Some(_) => bail!("`skills` must be a table"),
@@ -86,6 +141,7 @@ pub fn parse(text: &str, paths: &Paths) -> Result<Manifest> {
     Ok(Manifest {
         agents: default_agents,
         skills: parsed,
+        xcode,
     })
 }
 

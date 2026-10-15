@@ -890,3 +890,250 @@ fn empty_and_relative_xdg_directories_use_defaults() {
         assert!(!env.home.join("~").exists());
     }
 }
+
+fn fake_xcrun() -> &'static Path {
+    static BIN: std::sync::OnceLock<TempDir> = std::sync::OnceLock::new();
+    BIN.get_or_init(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let output = Command::new("rustc")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/xcrun.rs"
+            ))
+            .arg("-o")
+            .arg(dir.path().join("xcrun"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        dir
+    })
+    .path()
+}
+
+impl Env {
+    fn xcode(&self, args: &[&str]) -> Output {
+        let path = std::env::join_paths(
+            std::iter::once(fake_xcrun().to_path_buf())
+                .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap();
+        self.skl_with_env(
+            args,
+            &[("PATH", &path), ("FAKE_XCODE", self.remotes.as_os_str())],
+        )
+    }
+
+    fn export_xcode(&self, skills: &[(&str, &str)], version: &str) {
+        let export = self.remotes.join("export");
+        if export.exists() {
+            fs::remove_dir_all(&export).unwrap();
+        }
+        fs::create_dir_all(&export).unwrap();
+        fs::write(self.remotes.join("version"), version).unwrap();
+        for (name, body) in skills {
+            write_skill(&export.join(name), name, body);
+        }
+    }
+}
+
+#[test]
+fn xcode_all_refreshes_and_records_provenance() {
+    let env = Env::new();
+    env.write_manifest("[xcode]\nskills = '*'\n");
+    env.export_xcode(&[("alpha", "v1")], "Xcode 27\nBuild version A");
+    assert!(env.xcode(&["sync"]).status.success());
+    let old = fs::read_link(env.codex("alpha")).unwrap();
+    assert!(body(&env.claude("alpha")).contains("v1"));
+    assert!(
+        fs::read_to_string(env.config("skills.lock"))
+            .unwrap()
+            .contains("Build version A")
+    );
+    assert!(env.xcode(&["sync"]).status.success());
+    assert_eq!(old, fs::read_link(env.codex("alpha")).unwrap());
+    env.export_xcode(
+        &[("alpha", "v2"), ("beta", "new")],
+        "Xcode 27.1\nBuild version B",
+    );
+    assert!(env.xcode(&["sync"]).status.success());
+    assert!(body(&env.codex("alpha")).contains("v2"));
+    assert!(env.codex("beta").exists());
+    assert!(!old.exists());
+    let list = env.ok(&["list"]);
+    assert!(list.contains("Xcode 27.1"));
+    env.export_xcode(&[("beta", "new")], "Xcode 27.2");
+    assert!(env.xcode(&["sync"]).status.success());
+    assert!(!env.codex("alpha").exists());
+}
+
+#[test]
+fn xcode_selected_missing_and_failed_exports_preserve_install() {
+    let env = Env::new();
+    env.write_manifest("[xcode]\nskills = ['alpha']\nagents = ['codex']\n");
+    env.export_xcode(&[("alpha", "v1"), ("beta", "other")], "Xcode 27");
+    assert!(env.xcode(&["sync"]).status.success());
+    assert!(!env.codex("beta").exists());
+    assert!(!env.claude("alpha").exists());
+    let lock = fs::read(env.config("skills.lock")).unwrap();
+    let target = fs::read_link(env.codex("alpha")).unwrap();
+    env.export_xcode(&[("renamed", "v2")], "Xcode 28");
+    assert!(!env.xcode(&["sync"]).status.success());
+    assert_eq!(lock, fs::read(env.config("skills.lock")).unwrap());
+    assert_eq!(target, fs::read_link(env.codex("alpha")).unwrap());
+    fs::write(env.remotes.join("fail"), "").unwrap();
+    assert!(!env.xcode(&["sync"]).status.success());
+    assert_eq!(lock, fs::read(env.config("skills.lock")).unwrap());
+    assert!(body(&env.codex("alpha")).contains("v1"));
+    env.write_manifest("[xcode]\nskills = []\n");
+    // Removing the selection also works when Xcode is unavailable.
+    assert!(env.xcode(&["sync"]).status.success());
+    assert!(!env.codex("alpha").exists());
+}
+
+#[test]
+fn xcode_dry_run_and_locked_do_not_invoke_exporter() {
+    let env = Env::new();
+    env.write_manifest("[xcode]\nskills = ['alpha']\n");
+    env.export_xcode(&[("alpha", "v1")], "Xcode 27");
+    assert!(env.xcode(&["sync", "--dry-run"]).status.success());
+    assert!(!env.remotes.join("called").exists());
+    assert!(!env.config("skills.lock").exists());
+    assert!(!env.home.join(".local/share/skl/store").exists());
+    assert!(!env.home.join(".local/share/skl/state.toml").exists());
+    assert!(!env.xcode(&["sync", "--locked"]).status.success());
+    assert!(!env.remotes.join("called").exists());
+    assert!(env.xcode(&["sync"]).status.success());
+    fs::remove_file(env.remotes.join("called")).unwrap();
+    let lock = fs::read(env.config("skills.lock")).unwrap();
+    assert!(env.xcode(&["sync", "--locked"]).status.success());
+    assert!(!env.remotes.join("called").exists());
+    assert_eq!(lock, fs::read(env.config("skills.lock")).unwrap());
+    env.write_manifest("[xcode]\nskills = ['alpha', 'beta']\n");
+    assert!(!env.xcode(&["sync", "--locked"]).status.success());
+    assert_eq!(lock, fs::read(env.config("skills.lock")).unwrap());
+}
+
+#[test]
+fn xcode_conflicts_are_backed_up_only_with_force() {
+    let env = Env::new();
+    env.write_manifest("[xcode]\nskills = '*'\n");
+    env.export_xcode(&[("alpha", "exported")], "Xcode 27");
+    write_skill(&env.codex("alpha"), "alpha", "user content");
+    assert!(!env.xcode(&["sync"]).status.success());
+    assert!(body(&env.codex("alpha")).contains("user content"));
+    assert!(env.xcode(&["sync", "--force"]).status.success());
+    assert!(body(&env.codex("alpha")).contains("exported"));
+    let backups = env.home.join(".local/share/skl/backup");
+    let backup = fs::read_dir(backups)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert!(body(&backup.join("alpha")).contains("user content"));
+}
+
+#[test]
+fn xcode_invalid_exports_preserve_previous_content() {
+    let env = Env::new();
+    env.write_manifest("[xcode]\nskills = '*'\n");
+    env.export_xcode(&[("alpha", "v1")], "Xcode 27");
+    assert!(env.xcode(&["sync"]).status.success());
+    let lock = fs::read(env.config("skills.lock")).unwrap();
+    let skill = env.remotes.join("export/alpha/SKILL.md");
+    fs::remove_file(&skill).unwrap();
+    std::os::unix::fs::symlink(env.config("skills.toml"), &skill).unwrap();
+    assert!(!env.xcode(&["sync"]).status.success());
+    assert_eq!(lock, fs::read(env.config("skills.lock")).unwrap());
+    assert!(body(&env.codex("alpha")).contains("v1"));
+}
+
+#[test]
+fn xcode_profiles_skip_export_and_preserve_lock() {
+    let env = Env::new();
+    env.write_manifest("[xcode]\nskills = '*'\nprofiles = ['mac']\n");
+    env.export_xcode(&[("alpha", "v1")], "Xcode 27");
+    assert!(env.xcode(&["sync"]).status.success());
+    assert!(!env.remotes.join("called").exists());
+    assert!(env.xcode(&["--profile", "mac", "sync"]).status.success());
+    let lock = fs::read(env.config("skills.lock")).unwrap();
+    fs::remove_file(env.remotes.join("called")).unwrap();
+    assert!(env.xcode(&["sync"]).status.success());
+    assert!(!env.remotes.join("called").exists());
+    assert!(!env.codex("alpha").exists());
+    assert_eq!(lock, fs::read(env.config("skills.lock")).unwrap());
+}
+
+#[test]
+fn xcode_targeted_update_only_refreshes_requested_skill() {
+    let env = Env::new();
+    env.write_manifest("[xcode]\nskills = '*'\n");
+    env.export_xcode(&[("alpha", "v1"), ("beta", "v1")], "Xcode 27");
+    assert!(env.xcode(&["sync"]).status.success());
+    env.export_xcode(&[("alpha", "v2"), ("gamma", "new")], "Xcode 28");
+    assert!(env.xcode(&["update", "alpha"]).status.success());
+    assert!(body(&env.codex("alpha")).contains("v2"));
+    assert!(body(&env.codex("beta")).contains("v1"));
+    assert!(!env.codex("gamma").exists());
+    let lock = fs::read(env.config("skills.lock")).unwrap();
+    let count = env.store_commits();
+    env.export_xcode(&[("alpha", "v3")], "Xcode 29");
+    assert!(!env.xcode(&["update", "unknown"]).status.success());
+    assert_eq!(lock, fs::read(env.config("skills.lock")).unwrap());
+    assert_eq!(count, env.store_commits());
+}
+
+#[test]
+fn xcode_rejects_invalid_config_and_duplicate_sources() {
+    let env = Env::new();
+    for config in [
+        "skills = true",
+        "skills = ['../bad']",
+        "skills = '*'\npath = 'ignored'",
+        "skills = '*'\nprofiles = []",
+    ] {
+        env.write_manifest(&format!("[xcode]\n{config}\n"));
+        assert!(!env.xcode(&["sync"]).status.success());
+        assert!(!env.remotes.join("called").exists());
+    }
+    env.export_xcode(&[("alpha", "exported")], "Xcode 27");
+    env.write_manifest("[skills]\nalpha = { path = '~/local' }\n[xcode]\nskills = '*'\n");
+    let output = env.xcode(&["sync"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("conflicts with [skills]"));
+    assert_eq!(env.store_commits(), 0);
+    assert!(!env.codex("alpha").exists());
+}
+
+#[test]
+fn xcode_frontmatter_order_does_not_change_snapshot() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = Env::new();
+    env.write_manifest("[xcode]\nskills = '*'\n");
+    env.export_xcode(&[("alpha", "body")], "Xcode 27");
+    let skill = env.remotes.join("export/alpha/SKILL.md");
+    fs::write(
+        &skill,
+        "---\nname: alpha\ndescription: |\n  First line\n  Second line\neffort: high\n---\nbody\n",
+    )
+    .unwrap();
+    fs::set_permissions(&skill, fs::Permissions::from_mode(0o444)).unwrap();
+    assert!(env.xcode(&["sync"]).status.success());
+    let lock = fs::read(env.config("skills.lock")).unwrap();
+    let target = fs::read_link(env.codex("alpha")).unwrap();
+    fs::set_permissions(&skill, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::write(
+        &skill,
+        "---\ndescription: |\n  First line\n  Second line\neffort: high\nname: alpha\n---\nbody\n",
+    )
+    .unwrap();
+    fs::set_permissions(&skill, fs::Permissions::from_mode(0o444)).unwrap();
+    assert!(env.xcode(&["sync"]).status.success());
+    assert_eq!(lock, fs::read(env.config("skills.lock")).unwrap());
+    assert_eq!(target, fs::read_link(env.codex("alpha")).unwrap());
+    assert!(body(&env.codex("alpha")).contains("description: |\n  First line\n  Second line\n"));
+}

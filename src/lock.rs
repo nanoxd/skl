@@ -17,6 +17,8 @@ pub struct Lock {
     pub version: u32,
     #[serde(default)]
     pub skills: BTreeMap<String, LockedSkill>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub xcode: BTreeMap<String, XcodeSkill>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -28,6 +30,12 @@ pub struct LockedSkill {
     /// Directory inside the repo holding SKILL.md, empty for the repo root.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub subdir: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct XcodeSkill {
+    pub version: String,
+    pub digest: String,
 }
 
 impl LockedSkill {
@@ -48,6 +56,7 @@ impl Lock {
                 return Ok(Self {
                     version: VERSION,
                     skills: BTreeMap::new(),
+                    xcode: BTreeMap::new(),
                 });
             }
             Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
@@ -60,6 +69,12 @@ impl Lock {
                 path.display(),
                 lock.version
             );
+        }
+        for (name, entry) in &lock.xcode {
+            crate::manifest::validate_name(name)?;
+            if entry.digest.len() != 64 || !entry.digest.bytes().all(|b| b.is_ascii_hexdigit()) {
+                bail!("invalid Xcode digest for `{name}` in {}", path.display());
+            }
         }
         Ok(lock)
     }
