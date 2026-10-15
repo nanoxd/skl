@@ -96,8 +96,9 @@ the manifest.
 
 Without `subdir`, a skill is found by the `name` in its `SKILL.md` frontmatter, then
 by directory name, and a repo with a single skill can be installed under any name.
-Copies inside hidden directories, such as a tool-specific mirror, are ignored when the repo has
-another copy. If the name is ambiguous, `skl` asks you to set `subdir`.
+Copies inside hidden directories, such as a tool-specific mirror, are ignored only
+when a visible skill has the same name. Unique hidden skills, including `.curated`
+and `.experimental` collections, remain discoverable. If the name is ambiguous, `skl` asks you to set `subdir`.
 
 Skill names may contain letters, digits, `-`, `_` and `.`, and become the directory
 name in each agent. Run `skl agents list` to see every supported harness and its
@@ -290,10 +291,36 @@ Discovery needs no manifest and uses a temporary repository cache that is remove
 when the command finishes. It does not change configuration, installed skills,
 links, or the run lock. A root skill has subdirectory `.`. Duplicate names remain
 separate rows so their locations are visible. As with `add`, symlinked `SKILL.md`
-files are excluded, and hidden-directory copies are omitted when visible skills exist.
+files are excluded, and hidden-directory copies are omitted only when a visible skill has the same name.
 Descriptions support common plain, quoted, and multiline block frontmatter scalars;
 missing or unsupported descriptions are blank. Empty repositories with a commit
 but no skills produce a successful “No skills found” result.
+
+## Local collections
+
+Import several skills from a local directory without copying their contents:
+
+```sh
+skl add ./skills --all
+skl add ./skills --skill review --skill testing
+```
+
+Collections are searched recursively, including hidden directories; `.git` and
+symlinked directories or `SKILL.md` files are skipped. Visible skills take
+precedence over hidden copies with the same name. Other duplicate names fail
+before the manifest changes; add their individual directories with distinct
+`--skill` names to disambiguate. Selections match frontmatter names first, then
+directory names. Without selection flags, a collection containing several skills
+asks you to choose. `--ref` is only for Git sources.
+
+Each selected directory becomes an ordinary local `path` entry, so edits are
+immediately visible to agents and no Git lock entries are created. Paths beneath
+the config directory are saved relative to it for portable dotfiles; other paths
+use `~/...` when possible. The collection itself is not tracked: rerun `add --all`
+to include newly created skills. A directory with its own `SKILL.md` retains the
+single-skill behavior, including `--skill NAME` to rename it; use `--all` to scan
+its nested skills too. Existing direct local skills may still use a symlinked
+`SKILL.md`; collection discovery only accepts regular files.
 
 ## Profiles
 

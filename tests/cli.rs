@@ -2309,7 +2309,7 @@ fn discover_honors_ref_and_does_not_read_or_modify_installed_state() {
 }
 
 #[test]
-fn discover_uses_regular_files_and_existing_hidden_mirror_rules() {
+fn discover_keeps_unique_hidden_skills_and_excludes_symlink_documents() {
     let env = Env::new();
     let url = env.repo(
         "browse",
@@ -2321,7 +2321,7 @@ fn discover_uses_regular_files_and_existing_hidden_mirror_rules() {
     commit(&env.remote("browse"), "symlink");
     let out = env.ok(&["discover", &url]);
     assert!(out.contains("visible\tvisible"));
-    assert!(!out.contains("hidden"));
+    assert!(out.contains("hidden\t.agents/hidden"));
     assert!(!out.contains("symlink"));
     fs::remove_dir_all(env.remote("browse").join("visible")).unwrap();
     commit(&env.remote("browse"), "hidden only");
@@ -2583,4 +2583,150 @@ fn add_invalid_options_or_manifest_leave_manifest_unchanged() {
         fs::read_to_string(env.config("skills.toml")).unwrap(),
         invalid
     );
+}
+
+#[test]
+fn add_local_collection_all_preserves_unique_hidden_skills_and_relative_paths() {
+    let env = Env::new();
+    let root = env.config("collection");
+    write_skill(&root.join("visible"), "visible", "canonical");
+    write_skill(&root.join(".agents/visible"), "visible", "mirror");
+    write_skill(&root.join(".curated/curated"), "curated", "curated");
+    write_skill(&root.join(".experimental/next"), "next", "next");
+    write_skill(&root.join(".git/ignored"), "ignored", "ignored");
+    let outside = env.home.join("outside");
+    write_skill(&outside, "outside", "outside");
+    std::os::unix::fs::symlink(&outside, root.join("linked-directory")).unwrap();
+    fs::create_dir_all(root.join("linked-document")).unwrap();
+    std::os::unix::fs::symlink(
+        outside.join("SKILL.md"),
+        root.join("linked-document/SKILL.md"),
+    )
+    .unwrap();
+    env.ok(&["add", ".config/skl/collection", "--all"]);
+    let manifest = fs::read_to_string(env.config("skills.toml")).unwrap();
+    assert!(manifest.contains("collection/visible"));
+    assert!(!manifest.contains("~/"));
+    assert!(!manifest.contains("linked-"));
+    assert!(!manifest.contains("ignored"));
+    assert_eq!(
+        fs::read_link(env.claude("visible")).unwrap(),
+        root.join("visible")
+    );
+    assert!(body(&env.claude("visible")).contains("canonical"));
+    assert!(env.claude("curated").exists());
+    assert!(env.claude("next").exists());
+    assert!(!env.claude("outside").exists());
+    assert!(
+        fs::read_to_string(env.config("skills.lock"))
+            .unwrap()
+            .contains("version = 1")
+    );
+}
+
+#[test]
+fn add_local_collection_selection_and_failures_are_atomic() {
+    let env = Env::new();
+    let root = env.home.join("collection");
+    write_skill(&root.join("first"), "one", "one");
+    write_skill(&root.join("second"), "two", "two");
+    assert!(env.fails(&["add", "collection"]).contains("--all"));
+    assert!(!env.config("skills.toml").exists());
+    env.fails(&["add", "collection", "--skill", "one", "--skill", "missing"]);
+    assert!(!env.config("skills.toml").exists());
+    env.ok(&[
+        "add",
+        "collection",
+        "--skill",
+        "one",
+        "--skill",
+        "second",
+        "--agent",
+        "codex",
+    ]);
+    assert!(env.codex("one").exists());
+    assert!(env.codex("second").exists());
+    assert!(!env.claude("one").exists());
+    let manifest = fs::read_to_string(env.config("skills.toml")).unwrap();
+    env.fails(&["add", "collection", "--all", "--ref", "main"]);
+    assert_eq!(
+        manifest,
+        fs::read_to_string(env.config("skills.toml")).unwrap()
+    );
+}
+
+#[test]
+fn local_collection_ambiguity_is_sorted_and_never_writes_manifest() {
+    let env = Env::new();
+    let root = env.home.join("collection");
+    write_skill(&root.join("z"), "same", "z");
+    write_skill(&root.join("a"), "same", "a");
+    for args in [
+        vec!["add", "collection", "--all", "--no-sync"],
+        vec!["add", "collection", "--skill", "same"],
+    ] {
+        assert!(env.fails(&args).contains("(a, z)"));
+        assert!(!env.config("skills.toml").exists());
+    }
+    env.ok(&["add", "collection/a", "--skill", "renamed"]);
+    assert!(env.claude("renamed").exists());
+}
+
+#[test]
+fn git_hidden_collections_coexist_with_visible_skills_and_reject_ambiguous_adds() {
+    let env = Env::new();
+    let url = env.repo(
+        "collections",
+        &[
+            ("visible", "visible"),
+            (".agents/visible", "visible"),
+            (".curated/one", "one"),
+            (".experimental/two", "two"),
+        ],
+    );
+    env.ok(&["add", &url, "--all"]);
+    assert!(env.claude("visible").exists());
+    assert!(env.claude("one").exists());
+    assert!(env.claude("two").exists());
+    let ambiguous = env.repo(
+        "ambiguous",
+        &[
+            (".curated/a", "duplicate"),
+            (".experimental/b", "duplicate"),
+        ],
+    );
+    let manifest = fs::read_to_string(env.config("skills.toml")).unwrap();
+    assert!(
+        env.fails(&["add", &ambiguous, "--all", "--no-sync"])
+            .contains("(.curated/a, .experimental/b)")
+    );
+    assert_eq!(
+        manifest,
+        fs::read_to_string(env.config("skills.toml")).unwrap()
+    );
+    let discovery = env.ok(&["discover", &ambiguous]);
+    assert!(discovery.contains(".curated/a"));
+    assert!(discovery.contains(".experimental/b"));
+}
+
+#[test]
+fn local_collection_empty_and_root_skill_behavior() {
+    let env = Env::new();
+    fs::create_dir_all(env.home.join("empty")).unwrap();
+    assert!(
+        env.fails(&["add", "empty", "--all"])
+            .contains("no regular SKILL.md")
+    );
+    assert!(!env.config("skills.toml").exists());
+    let root = env.home.join("collection");
+    write_skill(&root, "parent", "parent");
+    write_skill(&root.join("nested"), "child", "child");
+    env.ok(&["add", "collection", "--skill", "renamed"]);
+    assert!(env.claude("renamed").exists());
+    assert!(!env.claude("child").exists());
+    env.ok(&["add", "collection", "--all"]);
+    assert!(env.claude("parent").exists());
+    assert!(env.claude("child").exists());
+    fs::write(root.join("nested/SKILL.md"), "live edit").unwrap();
+    assert_eq!(body(&env.claude("child")), "live edit");
 }

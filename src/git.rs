@@ -144,12 +144,7 @@ impl Git {
                 description: frontmatter_description(&text),
             });
         }
-        // Repos often mirror a skill into tool-specific hidden folders. Prefer the
-        // copies outside hidden directories when there are any.
-        let hidden = |c: &Candidate| c.subdir.split('/').any(|part| part.starts_with('.'));
-        if found.iter().any(|c| !hidden(c)) {
-            found.retain(|c| !hidden(c));
-        }
+        prefer_visible_skills(&mut found);
         Ok(found)
     }
 
@@ -350,4 +345,57 @@ fn frontmatter_description(text: &str) -> Option<String> {
     };
     let description = description.split_whitespace().collect::<Vec<_>>().join(" ");
     (!description.is_empty()).then_some(description)
+}
+
+/// Ignore hidden mirrors only when the same skill name exists outside hidden folders.
+/// Unique hidden skills (for example .curated collections) remain discoverable.
+pub fn prefer_visible_skills(found: &mut Vec<Candidate>) {
+    let hidden = |c: &Candidate| c.subdir.split('/').any(|part| part.starts_with('.'));
+    let visible: std::collections::BTreeSet<_> = found
+        .iter()
+        .filter(|c| !hidden(c))
+        .map(|c| c.name.clone())
+        .collect();
+    found.retain(|c| !hidden(c) || !visible.contains(&c.name));
+    found.sort_by(|a, b| a.subdir.cmp(&b.subdir));
+}
+
+/// Discover a local collection without following directory or document symlinks.
+pub fn local_candidates(root: &Path) -> Result<Vec<Candidate>> {
+    fn visit(root: &Path, dir: &Path, found: &mut Vec<Candidate>) -> Result<()> {
+        let mut entries = fs::read_dir(dir)
+            .with_context(|| format!("cannot read local collection {}", dir.display()))?
+            .collect::<std::io::Result<Vec<_>>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let kind = entry.file_type()?;
+            if kind.is_dir() && entry.file_name() != ".git" {
+                visit(root, &entry.path(), found)?;
+            } else if kind.is_file() && entry.file_name() == "SKILL.md" {
+                let text = fs::read_to_string(entry.path())
+                    .with_context(|| format!("cannot read {}", entry.path().display()))?;
+                let subdir = dir
+                    .strip_prefix(root)?
+                    .to_str()
+                    .context("local skill path is not UTF-8")?
+                    .to_owned();
+                let dir_name = dir
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .context("local skill directory name is not UTF-8")?
+                    .to_owned();
+                found.push(Candidate {
+                    subdir,
+                    name: frontmatter_name(&text).unwrap_or_else(|| dir_name.clone()),
+                    dir_name,
+                    description: frontmatter_description(&text),
+                });
+            }
+        }
+        Ok(())
+    }
+    let mut found = Vec::new();
+    visit(root, root, &mut found)?;
+    prefer_visible_skills(&mut found);
+    Ok(found)
 }
