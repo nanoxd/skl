@@ -3608,9 +3608,21 @@ fn repository_wildcard_empty_selection_has_offline_coverage() {
         "[repositories.tools]\nsource = '{url}'\nskills = '*'\n"
     ));
     e.ok(&["sync"]);
+    let repos = e.home.join(".local/share/skl/repos");
+    let cached = fs::read_dir(&repos)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert!(cached.join("HEAD").is_file());
     fs::remove_dir_all(e.remote("group")).unwrap();
     e.ok(&["sync", "--locked"]);
     e.ok(&["doctor"]);
+    assert!(cached.join("HEAD").is_file());
+    e.write_manifest("[skills]\n");
+    e.ok(&["sync"]);
+    assert!(!cached.exists());
 }
 
 #[test]

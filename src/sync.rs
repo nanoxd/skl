@@ -877,7 +877,14 @@ fn collect_garbage(paths: &Paths, lock: &Lock, state: &State) -> Result<()> {
             }
         }
     }
-    let keys: BTreeSet<&String> = live.iter().map(|(key, _)| key).collect();
+    let mut keys: BTreeSet<String> = live.iter().map(|(key, _)| key.clone()).collect();
+    // A complete empty wildcard still references its repository cache even
+    // though it has no individual skills or store commits to keep alive.
+    keys.extend(lock.repositories.values().filter_map(|coverage| {
+        manifest::source_url(&coverage.source)
+            .ok()
+            .map(|url| git::cache_key(&url))
+    }));
 
     for repo in read_dirs(&store)? {
         let key = file_name(&repo);
@@ -891,7 +898,7 @@ fn collect_garbage(paths: &Paths, lock: &Lock, state: &State) -> Result<()> {
         }
     }
     for repo in read_dirs(&paths.repos())? {
-        if !keys.contains(&file_name(&repo).trim_end_matches(".git").to_string()) {
+        if !keys.contains(file_name(&repo).trim_end_matches(".git")) {
             fs::remove_dir_all(&repo)?;
         }
     }
