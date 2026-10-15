@@ -93,11 +93,29 @@ enum Command {
     /// Show each skill, its locked commit and whether its links are in place, then
     /// anything in the agents' skill directories that skl doesn't manage
     List,
+    /// Show or configure the manifest's default agent harnesses
+    Agents {
+        #[command(subcommand)]
+        action: Option<AgentAction>,
+    },
     /// Show this machine's profiles, or set them
     Profile {
         #[command(subcommand)]
         action: Option<ProfileAction>,
     },
+}
+
+#[derive(Subcommand)]
+enum AgentAction {
+    /// List supported harnesses and their global skills directories
+    List,
+    /// Replace the manifest's default agents (per-skill overrides still apply)
+    Set {
+        #[arg(required = true)]
+        names: Vec<String>,
+    },
+    /// Restore the built-in defaults: claude-code and codex
+    Reset,
 }
 
 #[derive(Subcommand)]
@@ -126,9 +144,12 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<bool> {
     let paths = Paths::from_env()?;
-    // Everything except `list` reads and rewrites shared state, so runs take turns.
+    // Commands that can rewrite shared state take turns.
     let _guard = match cli.command {
-        Command::List => None,
+        Command::List
+        | Command::Agents {
+            action: None | Some(AgentAction::List),
+        } => None,
         _ => Some(lock_run(&paths)?),
     };
     let active = || Active::resolve(&paths, &cli.profiles);
@@ -182,6 +203,7 @@ fn run(cli: Cli) -> Result<bool> {
             sync::run(&paths, &active()?, &sync::Options::default())
         }
         Command::List => list(&paths, &active()?),
+        Command::Agents { action } => configure_agents(&paths, action),
         Command::Profile { action } => {
             let changed = action.is_some();
             match action {
@@ -204,6 +226,52 @@ fn run(cli: Cli) -> Result<bool> {
             Ok(true)
         }
     }
+}
+
+fn configure_agents(paths: &Paths, action: Option<AgentAction>) -> Result<bool> {
+    if matches!(action, Some(AgentAction::List)) {
+        for (id, _) in agents::KNOWN {
+            let agent = agents::resolve(id, paths)?;
+            println!("{id:<20} {}", paths.tilde(&agent.dir));
+        }
+        return Ok(true);
+    }
+    let mut doc = read_manifest_doc(paths)?;
+    let changed = action.is_some();
+    match action {
+        Some(AgentAction::Set { names }) => {
+            let mut array = toml_edit::Array::new();
+            let mut seen = BTreeSet::new();
+            for name in names {
+                agents::resolve(&name, paths)?;
+                if seen.insert(name.clone()) {
+                    array.push(name);
+                }
+            }
+            doc["agents"] = value(array);
+        }
+        Some(AgentAction::Reset) => {
+            doc.remove("agents");
+        }
+        _ => {}
+    }
+    let manifest = manifest::parse(&doc.to_string(), paths)?;
+    if changed {
+        write_atomic(&paths.manifest(), doc.to_string().as_bytes())?;
+    }
+    println!(
+        "Default agents: {}",
+        manifest
+            .agents
+            .iter()
+            .map(|a| a.id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    if changed {
+        println!("Run `skl sync` to apply");
+    }
+    Ok(true)
 }
 
 fn add(

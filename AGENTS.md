@@ -6,7 +6,7 @@ Guidance for coding agents (Claude Code, Codex, and others) working in this repo
 
 `skl` is a Rust CLI that keeps agent skills (directories holding a `SKILL.md`) in sync across machines. A manifest (`~/.config/skl/skills.toml`) lists the skills a machine should have and a lockfile (`skills.lock`) pins each git skill to a commit. Both are meant to live in dotfiles. Skills are unpacked into a content store under `~/.local/share/skl` and symlinked into each agent's skills directory (`~/.claude/skills` for Claude Code, `~/.agents/skills` for Codex, or any path).
 
-Commands: `sync`, `update`, `add`, `remove`, `list`, `profile`. Skills can be limited to named profiles, and each machine keeps its own active profiles in `<data>/profile`. Every command except `list` holds an exclusive `flock` on `<data>/run.lock`.
+Commands: `sync`, `update`, `add`, `remove`, `list`, `profile`, `agents`. Skills can be limited to named profiles, and each machine keeps its own active profiles in `<data>/profile`. Commands that can write hold an exclusive `flock` on `<data>/run.lock`; `list`, `agents`, and `agents list` are read-only.
 
 ## Layout
 
