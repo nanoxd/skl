@@ -234,3 +234,38 @@ fn config_home(paths: &Paths) -> PathBuf {
         .filter(|path| path.is_absolute())
         .unwrap_or_else(|| paths.home.join(".config"))
 }
+
+/// Configuration directories are hints, not proof that a harness is installed.
+/// Shared skill directories cannot identify the applications that consume them.
+pub fn detect(paths: &Paths) -> Result<Vec<Agent>> {
+    let mut detected = Vec::new();
+    for (id, directory) in known(paths) {
+        let agent = resolve(id, paths)?;
+        let base = paths.project.as_ref().unwrap_or(&paths.home);
+        let config = match *id {
+            "codex" => base.join(".codex"),
+            "cline" => base.join(".cline"),
+            "pi" => base.join(".pi/agent"),
+            "zed" if paths.project.is_none() => config_home(paths).join("zed"),
+            "zed" => base.join(".zed"),
+            "cursor" if paths.project.is_some() => base.join(".cursor"),
+            "openclaw" if paths.project.is_some() => base.join("skills"),
+            _ => {
+                // A registry path shared by several harnesses supplies no identity.
+                if known(paths)
+                    .iter()
+                    .filter(|(_, dir)| dir == directory)
+                    .count()
+                    > 1
+                {
+                    continue;
+                }
+                agent.dir.parent().unwrap().to_path_buf()
+            }
+        };
+        if config.is_dir() {
+            detected.push(agent);
+        }
+    }
+    Ok(detected)
+}
