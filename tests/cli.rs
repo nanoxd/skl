@@ -3024,3 +3024,213 @@ fn project_collection_import_keeps_every_source_portable() {
     assert!(project.join(".agents/skills/two/SKILL.md").is_file());
     assert!(!e.config("skills.toml").exists());
 }
+
+/// One-request loopback catalog. Never contacts skills.sh, even on failing tests.
+fn search_server(status: &str, body: String) -> (String, std::thread::JoinHandle<String>) {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::{Duration, Instant};
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("http://{}/api/search", listener.local_addr().unwrap());
+    let status = status.to_owned();
+    let handle = std::thread::spawn(move || {
+        let start = Instant::now();
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        start.elapsed() < Duration::from_secs(10),
+                        "mock search was never requested"
+                    );
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("mock accept: {error}"),
+            }
+        };
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            stream.read_exact(&mut byte).unwrap();
+            request.push(byte[0]);
+            assert!(request.len() < 8192);
+        }
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        // The client may close early on an oversized body.
+        let _ = stream.write_all(response.as_bytes());
+        String::from_utf8(request).unwrap()
+    });
+    (url, handle)
+}
+
+fn search_command(env: &Env, endpoint: &str, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_skl"))
+        .args(args)
+        .current_dir(&env.home)
+        .env_remove("HOME")
+        .env_remove("HTTP_PROXY")
+        .env_remove("HTTPS_PROXY")
+        .env_remove("ALL_PROXY")
+        .env_remove("http_proxy")
+        .env_remove("https_proxy")
+        .env_remove("all_proxy")
+        .env("SKL_SEARCH_URL", endpoint)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn search_encodes_queries_filters_limits_and_suggests_safe_commands_without_home() {
+    let env = Env::new();
+    let (url, server) = search_server(
+        "200 OK",
+        serde_json::json!({"skills": [
+            {"name": "small", "source": "example/skills", "installs": 3},
+            {"name": "-popular", "source": "example/repo", "installs": 20},
+            {"name": "other", "source": "another/repo", "installs": 99}
+        ]})
+        .to_string(),
+    );
+    let out = search_command(
+        &env,
+        &url,
+        &[
+            "search", "rust", "a&b", "--owner", "Example", "--limit", "1",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("example/repo/-popular (20 installs)"));
+    assert!(text.contains("skl add example/repo --skill=-popular"));
+    assert!(!text.contains("small"));
+    assert!(!text.contains("another"));
+    let request = server.join().unwrap();
+    assert!(request.contains("q=rust%20a%26b"), "{request}");
+    assert!(request.contains("limit=1"));
+    assert!(request.contains("owner=example"));
+    assert_eq!(fs::read_dir(&env.home).unwrap().count(), 0);
+}
+
+#[test]
+fn search_json_is_versioned_and_ignores_invalid_local_configuration() {
+    let env = Env::new();
+    env.write_manifest("invalid TOML [[[");
+    let (url, server) = search_server(
+        "200 OK",
+        r#"{"skills":[{"name":"review","source":"example/repo","installs":12,"id":"ignored"}]}"#
+            .into(),
+    );
+    let out = search_command(&env, &url, &["search", "review", "--json"]);
+    assert!(out.status.success());
+    assert!(out.stderr.is_empty());
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["command"], "search");
+    assert_eq!(value["status"], "ok");
+    assert_eq!(
+        value["data"]["skills"][0]["install_command"],
+        "skl add example/repo --skill=review"
+    );
+    server.join().unwrap();
+    assert_eq!(
+        fs::read_to_string(env.config("skills.toml")).unwrap(),
+        "invalid TOML [[["
+    );
+    assert!(!env.home.join(".local").exists());
+}
+
+#[test]
+fn search_distinguishes_empty_results_from_http_schema_and_unsafe_metadata_errors() {
+    let env = Env::new();
+    let cases = [
+        ("200 OK", r#"{"skills":[]}"#.to_owned(), true),
+        (
+            "503 Service Unavailable",
+            r#"{"skills":[]}"#.to_owned(),
+            false,
+        ),
+        ("200 OK", "not json".into(), false),
+        ("200 OK", r#"{"results":[]}"#.to_owned(), false),
+        (
+            "200 OK",
+            r#"{"skills":[{"name":"safe","source":"x/y","installs":-1}]}"#.to_owned(),
+            false,
+        ),
+        (
+            "200 OK",
+            r#"{"skills":[{"name":"safe","source":"x/y;bad","installs":1}]}"#.to_owned(),
+            false,
+        ),
+        (
+            "200 OK",
+            r#"{"skills":[{"name":"\u001b[2J","source":"x/y","installs":1}]}"#.to_owned(),
+            false,
+        ),
+        ("200 OK", " ".repeat(1024 * 1024 + 1), false),
+    ];
+    for (status, body, succeeds) in cases {
+        let (url, server) = search_server(status, body);
+        let out = search_command(&env, &url, &["search", "test", "--json"]);
+        assert_eq!(out.status.success(), succeeds);
+        assert!(out.stderr.is_empty());
+        assert!(!out.stdout.contains(&0x1b));
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(value["status"], if succeeds { "ok" } else { "error" });
+        if !succeeds {
+            assert!(value["data"].is_null());
+            assert_eq!(value["diagnostics"][0]["code"], "runtime-error");
+        }
+        server.join().unwrap();
+    }
+    let (url, server) = search_server("200 OK", r#"{"skills":[]}"#.into());
+    let out = search_command(&env, &url, &["search", "empty"]);
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "No skills found.\n");
+    server.join().unwrap();
+    assert_eq!(fs::read_dir(&env.home).unwrap().count(), 0);
+}
+
+#[test]
+fn search_rejects_invalid_options_before_network_and_reports_connection_failure() {
+    let env = Env::new();
+    for flags in [
+        vec!["--limit", "0"],
+        vec!["--limit", "101"],
+        vec!["--owner", "bad/owner"],
+    ] {
+        let mut args = vec!["search", "test", "--json"];
+        args.extend(flags);
+        let out = search_command(&env, "not-an-endpoint", &args);
+        assert!(!out.status.success());
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(value["status"], "error");
+        assert!(out.stderr.is_empty());
+    }
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/api/search", listener.local_addr().unwrap());
+    drop(listener);
+    let out = search_command(&env, &url, &["search", "test", "--json"]);
+    assert!(!out.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        value["diagnostics"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("search request failed")
+    );
+}

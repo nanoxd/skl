@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use crate::{doctor, info, lock::Lock, manifest, paths::Paths, profile::Active, sync, xcode};
 
-fn emit(command: &str, status: &str, data: Value, diagnostics: Value) -> Result<()> {
+pub(crate) fn emit(command: &str, status: &str, data: Value, diagnostics: Value) -> Result<()> {
     let text = serde_json::to_string(&json!({
         "schema_version": 1,
         "command": command,
@@ -29,7 +29,7 @@ pub fn error(command: &str, error: &anyhow::Error) {
         json!([{
             "code": "runtime-error", "severity": "error", "skill": null, "path": null,
             "message": format!("{error:#}"),
-            "remedy": "Correct the reported configuration or filesystem error and retry.",
+            "remedy": if command == "search" { "Check the query, search endpoint and network connection, then retry." } else { "Correct the reported configuration or filesystem error and retry." },
         }]),
     );
 }
