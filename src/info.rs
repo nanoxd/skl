@@ -63,7 +63,7 @@ impl std::fmt::Display for LinkStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Missing => "missing",
-            Self::Unmanaged => "unmanaged (conflict)",
+            Self::Unmanaged => "unmanaged",
             Self::Broken => "broken (owned)",
             Self::DifferentTarget => "different target (owned)",
             Self::Installed => "installed (owned)",
@@ -72,8 +72,12 @@ impl std::fmt::Display for LinkStatus {
     }
 }
 
-fn has_skill(path: &Path) -> bool {
-    fs::symlink_metadata(path.join("SKILL.md")).is_ok_and(|m| m.is_file())
+fn has_skill(path: &Path, local_source: bool) -> bool {
+    if local_source {
+        path.join("SKILL.md").is_file()
+    } else {
+        fs::symlink_metadata(path.join("SKILL.md")).is_ok_and(|m| m.is_file())
+    }
 }
 
 fn inspect(
@@ -100,7 +104,7 @@ fn inspect(
         LinkStatus::LocalSource
     } else if !owned {
         LinkStatus::Unmanaged
-    } else if !has_skill(&path) {
+    } else if !has_skill(&path, local_source) {
         LinkStatus::Broken
     } else if expected.is_some_and(|e| target.as_deref() != Some(e)) {
         LinkStatus::DifferentTarget
@@ -239,7 +243,10 @@ pub fn collect(paths: &Paths, active: &Active, name: &str) -> Result<Report> {
             "unknown skill `{name}`: not configured or found in configured agent directories (Xcode wildcard names require a prior sync)"
         );
     }
-    report.content_available = report.content_path.as_ref().is_some_and(|p| has_skill(p));
+    report.content_available = report
+        .content_path
+        .as_ref()
+        .is_some_and(|p| has_skill(p, report.origin == "local"));
     Ok(report)
 }
 

@@ -1737,7 +1737,7 @@ fn info_reports_git_pin_stale_lock_and_actual_ownership() {
     write_skill(&other, "notes", "user");
     std::os::unix::fs::symlink(&other, env.claude("notes")).unwrap();
     let out = env.ok(&["info", "notes"]);
-    assert!(out.contains("~/.claude/skills/notes — unmanaged (conflict)"));
+    assert!(out.contains("~/.claude/skills/notes — unmanaged"));
     assert!(out.contains("Recorded target:"));
     assert_eq!(fs::read_link(env.claude("notes")).unwrap(), other);
     env.write_manifest(&format!(
@@ -1792,10 +1792,9 @@ fn info_distinguishes_owned_wrong_target_broken_and_user_store_links() {
             .contains("different target (owned)")
     );
     fs::remove_file(old.join("SKILL.md")).unwrap();
-    std::os::unix::fs::symlink(new.join("SKILL.md"), old.join("SKILL.md")).unwrap();
     assert!(env.ok(&["info", "notes"]).contains("broken (owned)"));
     fs::remove_file(env.home.join(".local/share/skl/state.toml")).unwrap();
-    assert!(env.ok(&["info", "notes"]).contains("unmanaged (conflict)"));
+    assert!(env.ok(&["info", "notes"]).contains("unmanaged"));
 }
 
 #[test]
@@ -1822,4 +1821,50 @@ fn info_reports_local_source_in_agent_directory_as_direct() {
     let out = env.ok(&["info", "notes"]);
     assert!(out.contains("~/.agents/skills/notes — local source (direct)"));
     assert!(!out.contains("conflict"));
+}
+
+#[test]
+fn info_accepts_local_skill_document_symlinks() {
+    let env = Env::new();
+    let source = env.home.join("notes");
+    write_skill(&source, "notes", "local");
+    fs::rename(source.join("SKILL.md"), source.join("definition.md")).unwrap();
+    std::os::unix::fs::symlink("definition.md", source.join("SKILL.md")).unwrap();
+    env.write_manifest("[skills]\nnotes = { path = '~/notes' }\n");
+    env.ok(&["sync"]);
+    let out = env.ok(&["info", "notes"]);
+    assert!(out.contains("Content: ~/notes (available)"));
+    assert!(out.contains("~/.claude/skills/notes — installed (owned)"));
+    assert!(out.contains("~/.agents/skills/notes — installed (owned)"));
+    assert!(!out.contains("broken"));
+}
+
+#[test]
+fn info_matching_unowned_links_are_not_conflicts() {
+    let env = Env::new();
+    let source = env.home.join("notes");
+    write_skill(&source, "notes", "local");
+    fs::create_dir_all(env.claude("notes").parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&source, env.claude("notes")).unwrap();
+    env.write_manifest("[skills]\nnotes = { path = '~/notes' }\n");
+    env.ok(&["sync"]);
+    let out = env.ok(&["info", "notes"]);
+    assert!(out.contains("~/.claude/skills/notes — unmanaged"));
+    assert!(!out.contains("conflict"));
+    assert!(out.contains("~/.agents/skills/notes — installed (owned)"));
+    assert_eq!(fs::read_link(env.claude("notes")).unwrap(), source);
+}
+
+#[test]
+fn info_rejects_symlinked_skill_documents_in_git_store() {
+    let env = Env::new();
+    let source = env.repo("info-store", &[("notes", "notes")]);
+    env.write_manifest(&format!("[skills]\nnotes = '{source}'\n"));
+    env.ok(&["sync"]);
+    let content = fs::read_link(env.claude("notes")).unwrap();
+    fs::rename(content.join("SKILL.md"), content.join("definition.md")).unwrap();
+    std::os::unix::fs::symlink("definition.md", content.join("SKILL.md")).unwrap();
+    let out = env.ok(&["info", "notes"]);
+    assert!(out.contains("missing SKILL.md"));
+    assert!(out.contains("broken (owned)"));
 }
