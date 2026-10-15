@@ -107,7 +107,7 @@ enum Command {
         #[arg(long = "ref")]
         git_ref: Option<String>,
     },
-    /// Change per-skill settings without fetching their sources, then sync
+    /// Edit per-skill settings, then sync (use --no-sync to avoid fetching)
     Configure {
         #[arg(required = true)]
         names: Vec<String>,
@@ -535,7 +535,16 @@ fn add(
     for (name, mut item) in entries {
         manifest::validate_name(&name)?;
         if table.contains_key(&name) {
-            println!("= {name} is already in the manifest");
+            if !options.agents.is_empty()
+                || !options.os.is_empty()
+                || !options.only_profiles.is_empty()
+            {
+                println!(
+                    "= {name} is already in the manifest; use `skl configure {name}` to change settings"
+                );
+            } else {
+                println!("= {name} is already in the manifest");
+            }
             continue;
         }
         options.apply(&mut item, [false; 3])?;
