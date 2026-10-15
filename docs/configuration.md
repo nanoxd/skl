@@ -139,9 +139,9 @@ abort before changing the installation. Failed individual fetches or unpacks
 retain their previous pin and links. `--dry-run` discovers in a temporary cache
 without publishing lock/state/store/link changes.
 
-Saved update plans support explicit selections and alias references. Wildcard
-groups currently require ordinary `update`; plan/apply reject them rather than
-silently rediscovering membership after review.
+Saved update plans support explicit selections, alias references, and wildcard
+groups. Plans snapshot membership and exact pins; applying a plan never
+rediscovers membership after review. See [saved update plans](updates.md#saved-update-plans).
 
 ## Lockfile
 

@@ -62,15 +62,22 @@ pub fn run(paths: &Paths, active: &Active, opts: &Options) -> Result<bool> {
             .or_else(|| opts.update.clone()),
         ..Default::default()
     };
-    if opts.plan.is_some() || saved.is_some() {
-        crate::plan::check_manifest(paths)?;
+    let mut snapshots = BTreeMap::new();
+    if let Some(saved) = &saved
+        && !options.dry_run
+    {
+        for (name, snapshot) in &saved.xcode_snapshots {
+            snapshot.install(paths, name, &saved.target.xcode[name])?;
+        }
     }
     let (ok, lock) = run_inner(
         paths,
         active,
         &options,
         &git,
-        saved.as_ref().map(|p| &p.target),
+        saved.as_ref().map(|p| (&p.target, &p.xcode_snapshots)),
+        opts.plan.is_some(),
+        &mut snapshots,
     )?;
     if let Some(file) = &opts.plan {
         if !ok {
@@ -82,7 +89,7 @@ pub fn run(paths: &Paths, active: &Active, opts: &Options) -> Result<bool> {
             active,
             baseline.expect("planning captured a baseline"),
             options.update.unwrap_or_default(),
-            lock,
+            (lock, snapshots),
             &git,
         )?;
         println!("Saved update plan: {}", paths.tilde(file));
@@ -95,8 +102,12 @@ fn run_inner(
     active: &Active,
     opts: &Options,
     git: &Git,
-    planned: Option<&Lock>,
+    planned: Option<(&Lock, &BTreeMap<String, crate::xcode::Snapshot>)>,
+    planning: bool,
+    snapshots: &mut BTreeMap<String, crate::xcode::Snapshot>,
 ) -> Result<(bool, Lock)> {
+    let embedded = planned.map(|(_, snapshots)| snapshots);
+    let planned = planned.map(|(lock, _)| lock);
     let mut manifest = manifest::load(paths)?;
     let old_lock = Lock::load(&paths.lock())?;
     let mut out = Report::new(opts.dry_run);
@@ -123,7 +134,13 @@ fn run_inner(
             }
             continue;
         }
-        if opts.locked {
+        if let Some(plan) = planned {
+            let coverage = plan
+                .repositories
+                .get(alias)
+                .context("plan missing wildcard coverage")?;
+            repository_entries.insert(alias.clone(), coverage.clone());
+        } else if opts.locked {
             let old = old_lock.repositories.get(alias).with_context(|| {
                 format!(
                     "repository `{alias}` has no wildcard coverage; run `skl sync` without --locked"
@@ -168,7 +185,30 @@ fn run_inner(
                     .iter()
                     .all(|name| manifest.skills.iter().any(|s| &s.name == name))
         });
-        if !config.enabled(active) {
+        if let Some(plan) = planned {
+            xcode_entries = plan.xcode.clone();
+            xcode_all_complete = plan.xcode_all_complete;
+            for (name, entry) in &xcode_entries {
+                if old_lock.xcode.get(name) != Some(entry) {
+                    out.event(
+                        if old_lock.xcode.contains_key(name) {
+                            '↑'
+                        } else {
+                            '+'
+                        },
+                        name,
+                        format!("Xcode {}", entry.version.replace('\n', " / ")),
+                    );
+                }
+            }
+            for name in old_lock
+                .xcode
+                .keys()
+                .filter(|name| !xcode_entries.contains_key(*name))
+            {
+                out.event('-', name, "Xcode".into());
+            }
+        } else if !config.enabled(active) {
             xcode_entries = old_lock.xcode.clone();
             xcode_all_complete = old_lock.xcode_all_complete;
         } else if config.skills.as_ref().is_some_and(|s| s.is_empty()) {
@@ -193,17 +233,34 @@ fn run_inner(
                         "Xcode exports are not cached for this selection; run `skl sync` without --locked"
                     );
                 }
-            } else if opts.dry_run {
+            } else if opts.dry_run && !planning {
                 out.note("would run `xcrun agent skills export <staging-directory>` and select Xcode skills".into());
             } else {
                 match crate::xcode::Export::run().and_then(|export| {
+                    let staging = planning.then(tempfile::tempdir).transpose()?;
+                    let mut install_paths = paths.clone();
+                    if let Some(stage) = &staging {
+                        install_paths.data = stage.path().to_owned();
+                    }
                     let (entries, errors) = export.install(
-                        paths,
+                        &install_paths,
                         config,
                         &old_lock.xcode,
                         &manifest.skills,
                         opts.update.as_ref(),
                     )?;
+                    if planning {
+                        for (name, entry) in &entries {
+                            let staged = crate::xcode::skill_dir(&install_paths, name, entry);
+                            let source = if staged.exists() {
+                                staged
+                            } else {
+                                crate::xcode::skill_dir(paths, name, entry)
+                            };
+                            snapshots
+                                .insert(name.clone(), crate::xcode::Snapshot::capture(&source)?);
+                        }
+                    }
                     let complete = config.skills.is_none() && export.covers_all(&entries);
                     Ok((entries, errors, complete))
                 }) {
@@ -498,7 +555,11 @@ fn run_inner(
                 skill_dir(&origin.url, &entry.commit, &entry.subdir)
             }
             Origin::Local(dir) => {
+                let embedded_content = embedded
+                    .is_some_and(|snapshots| snapshots.contains_key(&skill.name))
+                    || planning && snapshots.contains_key(&skill.name);
                 if opts.dry_run
+                    && !embedded_content
                     && manifest
                         .xcode
                         .as_ref()
@@ -508,7 +569,7 @@ fn run_inner(
                 {
                     continue;
                 }
-                if !dir.join("SKILL.md").is_file() {
+                if !embedded_content && !dir.join("SKILL.md").is_file() {
                     out.error(
                         &skill.name,
                         &format!("{} has no SKILL.md", paths.tilde(dir)),

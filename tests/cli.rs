@@ -1591,7 +1591,7 @@ fn saved_update_plan_is_read_only_and_rejects_stale_or_edited_context() {
     );
     fs::write(
         e.home.join("review.toml"),
-        original.replace("version = 1", "version = 900"),
+        original.replacen("version = 2", "version = 900", 1),
     )
     .unwrap();
     assert!(
@@ -1648,11 +1648,12 @@ fn saved_update_plan_fails_without_artifact_for_missing_skill_or_xcode() {
     e.fails(&["update", "--plan", "review.toml"]);
     assert!(!e.home.join("review.toml").exists());
     assert!(!e.home.join(".local/share/skl").exists());
-    e.write_manifest("[xcode]\nskills = '*'\n");
-    assert!(
-        e.fails(&["update", "--plan", "review.toml"])
-            .contains("Xcode")
-    );
+    e.write_manifest("[xcode]\nskills = '*'\nos = ['macos', 'linux']\n");
+    fs::write(e.remotes.join("fail"), "unavailable").unwrap();
+    let output = e.xcode(&["update", "--plan", "review.toml"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Xcode"));
+    assert!(!e.home.join("review.toml").exists());
 }
 
 #[test]
@@ -3594,11 +3595,11 @@ fn repository_wildcard_dry_run_and_uncached_inspection_are_read_only() {
     assert!(!e.home.join(".local/share/skl").exists());
     assert!(!e.codex("a").exists());
     let plan = e.home.join("plan.toml");
-    assert!(
-        e.fails(&["update", "--plan", plan.to_str().unwrap()])
-            .contains("wildcard repositories")
-    );
-    assert!(!plan.exists());
+    e.ok(&["update", "--plan", plan.to_str().unwrap()]);
+    assert!(plan.is_file());
+    assert!(!e.config("skills.lock").exists());
+    assert!(!e.home.join(".local/share/skl").exists());
+    assert!(!e.codex("a").exists());
 }
 
 #[test]
@@ -4490,4 +4491,338 @@ fn verify_never_lazy_fetches_missing_promisor_objects() {
     let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
     assert_eq!(report["data"]["skills"][0]["status"], "unavailable");
     assert_eq!(verification_snapshot(&e.home), before);
+}
+
+#[test]
+fn saved_plan_freezes_wildcard_membership_and_pins() {
+    let e = Env::new();
+    let url = e.repo("wildplan", &[("a", "a"), ("gone", "gone")]);
+    e.write_manifest(&format!(
+        "[repositories.team]\nsource = '{url}'\nskills = '*'\n"
+    ));
+    e.ok(&["sync"]);
+    fs::remove_dir_all(e.remote("wildplan").join("gone")).unwrap();
+    write_skill(&e.remote("wildplan").join("b"), "b", "reviewed addition");
+    write_skill(&e.remote("wildplan").join("a"), "a", "reviewed update");
+    commit(&e.remote("wildplan"), "reviewed membership");
+    let before = fs::read(e.config("skills.lock")).unwrap();
+    e.ok(&["update", "--plan", "review.toml"]);
+    assert_eq!(before, fs::read(e.config("skills.lock")).unwrap());
+    assert!(!e.codex("b").exists());
+    assert!(e.codex("gone").exists());
+    let plan = fs::read_to_string(e.home.join("review.toml")).unwrap();
+    assert!(plan.contains("+reviewed addition"));
+    assert!(plan.contains("removed:gone"));
+    fs::remove_dir_all(e.remote("wildplan").join("b")).unwrap();
+    write_skill(
+        &e.remote("wildplan").join("later"),
+        "later",
+        "unreviewed addition",
+    );
+    commit(&e.remote("wildplan"), "unreviewed membership");
+    e.ok(&["update", "--apply-plan", "review.toml"]);
+    assert!(body(&e.codex("a")).contains("reviewed update"));
+    assert!(body(&e.codex("b")).contains("reviewed addition"));
+    assert!(!e.codex("gone").exists());
+    assert!(!e.codex("later").exists());
+}
+
+#[test]
+fn saved_plan_xcode_embeds_reviewed_content_and_applies_without_export() {
+    use std::os::unix::fs::PermissionsExt;
+    let e = Env::new();
+    e.write_manifest("[xcode]\nskills = '*'\nos = ['macos', 'linux']\n");
+    e.export_xcode(&[("apple", "reviewed content")], "Xcode 27\nBuild reviewed");
+    let script = e.remotes.join("export/apple/run");
+    fs::write(&script, [0, 255, 1, 128]).unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::create_dir(e.remotes.join("export/apple/empty")).unwrap();
+    let out = e.xcode(&["update", "--plan", "review.toml"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!e.home.join(".local/share/skl").exists());
+    assert!(!e.config("skills.lock").exists());
+    let original = fs::read_to_string(e.home.join("review.toml")).unwrap();
+    assert!(original.contains("+reviewed content"));
+    // A dry apply must not publish embedded snapshots or any other data.
+    assert!(
+        e.xcode(&["update", "--apply-plan", "review.toml", "--dry-run"])
+            .status
+            .success()
+    );
+    assert!(!e.home.join(".local/share/skl").exists());
+    e.export_xcode(
+        &[("apple", "changed after review"), ("later", "unreviewed")],
+        "Xcode 28",
+    );
+    fs::write(e.remotes.join("fail"), "no export allowed").unwrap();
+    // No xcrun on PATH is needed when applying the self-contained plan.
+    e.ok(&["update", "--apply-plan", "review.toml"]);
+    assert!(body(&e.codex("apple")).contains("reviewed content"));
+    assert!(!body(&e.codex("apple")).contains("changed after review"));
+    assert!(!e.codex("later").exists());
+    assert_eq!(
+        fs::read(e.codex("apple").join("run")).unwrap(),
+        [0, 255, 1, 128]
+    );
+    assert_eq!(
+        fs::metadata(e.codex("apple").join("run"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
+    );
+    assert!(e.codex("apple").join("empty").is_dir());
+}
+
+#[test]
+fn saved_plan_xcode_tampering_and_generated_destinations_are_rejected() {
+    let e = Env::new();
+    e.write_manifest("[xcode]\nskills = '*'\nos = ['macos', 'linux']\nagents = ['~/generated']\n");
+    e.export_xcode(&[("apple", "reviewed")], "Xcode 27");
+    fs::create_dir_all(e.home.join("generated")).unwrap();
+    assert!(
+        !e.xcode(&["update", "--plan", "generated/review.toml"])
+            .status
+            .success()
+    );
+    assert!(!e.home.join("generated/review.toml").exists());
+    assert!(
+        e.xcode(&["update", "--plan", "review.toml"])
+            .status
+            .success()
+    );
+    let original = fs::read_to_string(e.home.join("review.toml")).unwrap();
+    fs::write(
+        e.home.join("review.toml"),
+        original.replace("+reviewed", "+edited"),
+    )
+    .unwrap();
+    assert!(
+        e.fails(&["update", "--apply-plan", "review.toml"])
+            .contains("checksum")
+    );
+    fs::write(e.home.join("review.toml"), original).unwrap();
+    fs::rename(e.home.join("generated"), e.home.join("elsewhere")).unwrap();
+    std::os::unix::fs::symlink(e.home.join("elsewhere"), e.home.join("generated")).unwrap();
+    assert!(
+        e.fails(&["update", "--apply-plan", "review.toml"])
+            .contains("stale")
+    );
+}
+
+#[test]
+fn saved_plan_xcode_selected_updates_preserve_other_pins_and_review_removals() {
+    let e = Env::new();
+    e.write_manifest("[xcode]\nskills = '*'\nos = ['macos', 'linux']\n");
+    e.export_xcode(
+        &[("a", "old a"), ("b", "old b"), ("gone", "removed content")],
+        "Xcode 27",
+    );
+    assert!(e.xcode(&["sync"]).status.success());
+    e.export_xcode(&[("a", "new a"), ("b", "unselected b")], "Xcode 28");
+    assert!(
+        e.xcode(&["update", "a", "--plan", "selected.toml"])
+            .status
+            .success()
+    );
+    fs::remove_file(e.remotes.join("called")).unwrap();
+    e.ok(&["update", "--apply-plan", "selected.toml"]);
+    assert!(!e.remotes.join("called").exists());
+    assert!(body(&e.codex("a")).contains("new a"));
+    assert!(body(&e.codex("b")).contains("old b"));
+    assert!(body(&e.codex("gone")).contains("removed content"));
+    assert!(e.xcode(&["update", "--plan", "all.toml"]).status.success());
+    let plan = fs::read_to_string(e.home.join("all.toml")).unwrap();
+    assert!(plan.contains("removed:xcode:gone"));
+    assert!(plan.contains("-removed content"));
+    e.ok(&["update", "--apply-plan", "all.toml"]);
+    assert!(!e.codex("gone").exists());
+    assert!(body(&e.codex("b")).contains("unselected b"));
+}
+
+#[test]
+fn saved_plan_disabled_or_unrelated_sources_do_not_export() {
+    let e = Env::new();
+    let url = e.repo("onlygit", &[("a", "a")]);
+    e.write_manifest(&format!(
+        "[skills]\na = {{source = '{url}'}}\n[xcode]\nskills = '*'\nos = ['macos', 'linux']\n"
+    ));
+    e.ok(&["update", "a", "--plan", "git.toml"]);
+    assert!(!e.remotes.join("called").exists());
+    e.ok(&["update", "--apply-plan", "git.toml"]);
+    e.write_manifest(&format!("[repositories.disabled]\nsource = 'file:///unavailable'\nskills = '*'\nos = ['{}']\n[xcode]\nskills = '*'\nos = ['{}']\n", other_os(), other_os()));
+    e.ok(&["update", "--plan", "disabled.toml"]);
+    e.ok(&["update", "--apply-plan", "disabled.toml"]);
+    assert!(!e.remotes.join("called").exists());
+}
+
+#[test]
+fn saved_plan_xcode_missing_previous_content_fails_without_artifact() {
+    let e = Env::new();
+    e.write_manifest("[xcode]\nskills = ['a']\nos = ['macos', 'linux']\n");
+    e.export_xcode(&[("a", "old a")], "Xcode 27");
+    assert!(e.xcode(&["sync"]).status.success());
+    fs::remove_dir_all(e.home.join(".local/share/skl/store")).unwrap();
+    e.export_xcode(&[("a", "new a")], "Xcode 28");
+    assert!(
+        !e.xcode(&["update", "--plan", "missing.toml"])
+            .status
+            .success()
+    );
+    assert!(!e.home.join("missing.toml").exists());
+}
+
+#[test]
+fn saved_plan_payload_tampering_is_rejected() {
+    let e = Env::new();
+    e.write_manifest("[xcode]\nskills = '*'\nos = ['macos', 'linux']\n");
+    e.export_xcode(&[("a", "reviewed")], "Xcode 27");
+    assert!(
+        e.xcode(&["update", "--plan", "review.toml"])
+            .status
+            .success()
+    );
+    let original = fs::read_to_string(e.home.join("review.toml")).unwrap();
+    for alteration in ["bytes", "path", "mode"] {
+        let mut plan: toml::Value = toml::from_str(&original).unwrap();
+        let nodes = plan["xcode_snapshots"]["a"]["nodes"]
+            .as_table_mut()
+            .unwrap();
+        match alteration {
+            "bytes" => {
+                nodes.get_mut("SKILL.md").unwrap()["bytes"] =
+                    toml::Value::Array(vec![toml::Value::Integer(0)])
+            }
+            "path" => {
+                let node = nodes.remove("SKILL.md").unwrap();
+                nodes.insert("../escape".into(), node);
+            }
+            "mode" => nodes.get_mut("SKILL.md").unwrap()["mode"] = toml::Value::Integer(0o104755),
+            _ => unreachable!(),
+        }
+        fs::write(e.home.join("review.toml"), toml::to_string(&plan).unwrap()).unwrap();
+        let err = e.fails(&["update", "--apply-plan", "review.toml"]);
+        assert!(err.contains("checksum"), "{err}");
+        assert!(!e.home.join(".local/share/skl/store").exists());
+        assert!(!e.home.join("escape").exists());
+    }
+}
+
+#[test]
+fn saved_plan_wildcard_destinations_protect_aliases_and_reject_stale_paths() {
+    let e = Env::new();
+    let url = e.repo("wilddest", &[("a", "a")]);
+    e.write_manifest(&format!(
+        "[repositories.team]\nsource = '{url}'\nskills = '*'\nagents = ['~/generated']\n"
+    ));
+    fs::create_dir(e.home.join("generated")).unwrap();
+    std::os::unix::fs::symlink(e.home.join("generated"), e.home.join("alias")).unwrap();
+    assert!(
+        e.fails(&["update", "--plan", "alias/review.toml"])
+            .contains("outside")
+    );
+    assert!(!e.home.join("generated/review.toml").exists());
+    e.ok(&["update", "--plan", "review.toml"]);
+    fs::rename(e.home.join("generated"), e.home.join("moved")).unwrap();
+    std::os::unix::fs::symlink(e.home.join("moved"), e.home.join("generated")).unwrap();
+    assert!(
+        e.fails(&["update", "--apply-plan", "review.toml"])
+            .contains("stale")
+    );
+}
+
+#[test]
+fn saved_plan_xcode_partial_export_failure_preserves_previous_install() {
+    let e = Env::new();
+    e.write_manifest("[xcode]\nskills = ['a', 'b']\nos = ['macos', 'linux']\n");
+    e.export_xcode(&[("a", "old a"), ("b", "old b")], "Xcode 27");
+    assert!(e.xcode(&["sync"]).status.success());
+    let lock = fs::read(e.config("skills.lock")).unwrap();
+    e.export_xcode(&[("a", "new a")], "Xcode 28");
+    assert!(
+        !e.xcode(&["update", "--plan", "review.toml"])
+            .status
+            .success()
+    );
+    assert!(!e.home.join("review.toml").exists());
+    assert_eq!(lock, fs::read(e.config("skills.lock")).unwrap());
+    assert!(body(&e.codex("a")).contains("old a"));
+    assert!(body(&e.codex("b")).contains("old b"));
+}
+
+#[test]
+fn saved_plan_xcode_dry_apply_previews_replacement_and_detects_conflicts() {
+    let e = Env::new();
+    e.write_manifest("[xcode]\nskills = '*'\nos = ['macos', 'linux']\n");
+    e.export_xcode(&[("a", "old a")], "Xcode 27");
+    assert!(e.xcode(&["sync"]).status.success());
+    e.export_xcode(&[("a", "new a"), ("b", "new b")], "Xcode 28");
+    assert!(
+        e.xcode(&["update", "--plan", "review.toml"])
+            .status
+            .success()
+    );
+    let lock = fs::read(e.config("skills.lock")).unwrap();
+    let state = fs::read(e.home.join(".local/share/skl/state.toml")).unwrap();
+    let output = e.ok(&["update", "--apply-plan", "review.toml", "--dry-run"]);
+    assert!(output.contains("↑ a"), "{output}");
+    assert!(!output.contains("removed"), "{output}");
+    assert!(output.contains("2 links repointed"), "{output}");
+    assert_eq!(
+        fs::read_dir(e.home.join(".local/share/skl/store/xcode"))
+            .unwrap()
+            .count(),
+        1
+    );
+    assert!(body(&e.codex("a")).contains("old a"));
+    assert!(!e.codex("b").exists());
+    assert_eq!(fs::read(e.config("skills.lock")).unwrap(), lock);
+    assert_eq!(
+        fs::read(e.home.join(".local/share/skl/state.toml")).unwrap(),
+        state
+    );
+    fs::create_dir(e.codex("b")).unwrap();
+    fs::write(e.codex("b").join("user-file"), "keep").unwrap();
+    let error = e.fails(&["update", "--apply-plan", "review.toml", "--dry-run"]);
+    assert!(error.contains("skl didn't create it"), "{error}");
+    assert_eq!(
+        fs::read_to_string(e.codex("b").join("user-file")).unwrap(),
+        "keep"
+    );
+    assert_eq!(fs::read(e.config("skills.lock")).unwrap(), lock);
+    assert_eq!(
+        fs::read(e.home.join(".local/share/skl/state.toml")).unwrap(),
+        state
+    );
+}
+
+#[test]
+fn saved_plan_wildcard_exclusions_preserve_complete_coverage() {
+    let e = Env::new();
+    let url = e.repo("excludedplan", &[("a", "a"), ("b", "b")]);
+    e.write_manifest(&format!(
+        "[repositories.team]\nsource = '{url}'\nskills = '*'\nexclude = ['a']\n"
+    ));
+    e.ok(&["update", "--plan", "review.toml"]);
+    let plan = fs::read_to_string(e.home.join("review.toml")).unwrap();
+    assert!(plan.contains("a = \"a\""));
+    write_skill(
+        &e.remote("excludedplan").join("later"),
+        "later",
+        "unreviewed",
+    );
+    commit(&e.remote("excludedplan"), "later member");
+    e.ok(&["update", "--apply-plan", "review.toml"]);
+    assert!(!e.codex("a").exists());
+    assert!(e.codex("b").exists());
+    assert!(!e.codex("later").exists());
+    let lock: toml::Value =
+        toml::from_str(&fs::read_to_string(e.config("skills.lock")).unwrap()).unwrap();
+    assert!(lock["repositories"]["team"]["members"].get("a").is_some());
+    assert!(lock["skills"].get("a").is_none());
 }

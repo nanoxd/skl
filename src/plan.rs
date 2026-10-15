@@ -55,9 +55,29 @@ impl Context {
         let parsed = manifest::load(paths)?;
         let mut destinations = BTreeMap::new();
         let mut local_paths = BTreeMap::new();
-        for skill in parsed.skills {
+        let skills = parsed.skills;
+        for (alias, group) in &parsed.repositories {
+            let skill = group.skill(alias, &parsed.agents, paths)?;
             destinations.insert(
-                skill.name.clone(),
+                format!("repository:{alias}"),
+                skill
+                    .agents
+                    .iter()
+                    .map(|a| absolute(&a.dir))
+                    .collect::<Result<Vec<_>>>()?,
+            );
+        }
+        if let Some(config) = &parsed.xcode {
+            for agent in &config.agents {
+                destinations.insert(
+                    format!("xcode:{}", agent.dir.display()),
+                    vec![absolute(&agent.dir)?],
+                );
+            }
+        }
+        for skill in skills {
+            destinations.insert(
+                format!("skill:{}", skill.name),
                 skill
                     .agents
                     .iter()
@@ -91,22 +111,9 @@ pub struct Plan {
     pub target: Lock,
     /// Full patches are stored with the exact target commits for review.
     changes: BTreeMap<String, String>,
+    #[serde(default)]
+    pub xcode_snapshots: BTreeMap<String, crate::xcode::Snapshot>,
     checksum: String,
-}
-
-pub fn check_manifest(paths: &Paths) -> Result<()> {
-    let manifest = manifest::load(paths)?;
-    if !manifest.repositories.is_empty() {
-        bail!(
-            "saved update plans do not support wildcard repositories; use ordinary update for this manifest"
-        );
-    }
-    if manifest.xcode.is_some() {
-        bail!(
-            "saved update plans do not support Xcode imports; use ordinary update for this manifest"
-        );
-    }
-    Ok(())
 }
 
 impl Plan {
@@ -117,12 +124,14 @@ impl Plan {
             names: &'a [String],
             target: &'a Lock,
             changes: &'a BTreeMap<String, String>,
+            xcode_snapshots: &'a BTreeMap<String, crate::xcode::Snapshot>,
         }
         let payload = Payload {
             context: &self.context,
             names: &self.names,
             target: &self.target,
             changes: &self.changes,
+            xcode_snapshots: &self.xcode_snapshots,
         };
         Ok(format!(
             "{:x}",
@@ -136,7 +145,7 @@ impl Plan {
                 .with_context(|| format!("reading plan {}", paths.tilde(file)))?,
         )
         .with_context(|| format!("invalid update plan {}", paths.tilde(file)))?;
-        if plan.version != 1 {
+        if plan.version != 2 {
             bail!("unsupported update plan version {}", plan.version);
         }
         if plan.context != Context::read(paths, active)? {
@@ -147,12 +156,74 @@ impl Plan {
         if plan.checksum != plan.checksum()? {
             bail!("update plan checksum mismatch; generate a new plan instead of editing it");
         }
-        let manifest = manifest::load(paths)?;
+        let mut manifest = manifest::load(paths)?;
         let old = Lock::load(&paths.lock())?;
-        if plan.target.version != old.version
-            || !plan.target.xcode.is_empty()
-            || plan.target.xcode_all_complete
+        for (alias, group) in &manifest.repositories {
+            let coverage = plan.target.repositories.get(alias);
+            let enabled = group.skill(alias, &manifest.agents, paths)?.enabled(active);
+            if !enabled {
+                if coverage != old.repositories.get(alias) {
+                    bail!("plan changes inactive repository `{alias}`");
+                }
+            } else {
+                let coverage = coverage.context("plan missing wildcard coverage")?;
+                if !crate::repositories::matches(group, coverage, &manifest.agents, paths)? {
+                    bail!("plan wildcard source mismatch");
+                }
+            }
+        }
+        if plan
+            .target
+            .repositories
+            .keys()
+            .any(|alias| !manifest.repositories.contains_key(alias))
         {
+            bail!("unexpected repository in plan");
+        }
+        for coverage in plan.target.repositories.values() {
+            for (name, subdir) in &coverage.members {
+                manifest::validate_name(name)?;
+                if subdir.starts_with('/')
+                    || (!subdir.is_empty()
+                        && subdir
+                            .split('/')
+                            .any(|part| matches!(part, "" | "." | "..")))
+                {
+                    bail!("invalid repository directory for `{name}` in update plan");
+                }
+            }
+        }
+        crate::repositories::append(paths, &mut manifest, &plan.target.repositories)?;
+        if let Some(config) = &manifest.xcode {
+            if !config.enabled(active)
+                && (plan.target.xcode != old.xcode
+                    || plan.target.xcode_all_complete != old.xcode_all_complete)
+            {
+                bail!("plan changes inactive Xcode imports");
+            }
+            for (name, entry) in &plan.target.xcode {
+                manifest::validate_name(name)?;
+                if config.enabled(active) && !config.selects(name) {
+                    bail!("unexpected Xcode skill in plan");
+                }
+                if let Some(snapshot) = plan.xcode_snapshots.get(name) {
+                    snapshot.verify(entry)?;
+                } else if old.xcode.get(name) != Some(entry) {
+                    bail!("plan missing Xcode snapshot for `{name}`");
+                }
+            }
+        } else if !plan.target.xcode.is_empty() || plan.target.xcode_all_complete {
+            bail!("unexpected Xcode metadata in plan");
+        }
+        if plan
+            .xcode_snapshots
+            .keys()
+            .any(|name| !plan.target.xcode.contains_key(name))
+        {
+            bail!("unexpected Xcode snapshot in plan");
+        }
+
+        if plan.target.version != old.version {
             bail!("invalid update plan lock metadata");
         }
         let mut expected = BTreeMap::new();
@@ -199,15 +270,17 @@ impl Plan {
         active: &Active,
         context: Context,
         names: Vec<String>,
-        target: Lock,
+        artifact: (Lock, BTreeMap<String, crate::xcode::Snapshot>),
         git: &Git,
     ) -> Result<()> {
+        let (target, xcode_snapshots) = artifact;
         if context != Context::read(paths, active)? {
             bail!("manifest or lock changed while planning; generate a new plan");
         }
         let manifest = manifest::load(paths)?;
         let output = absolute(file)?;
         let mut protected = vec![absolute(&paths.config)?, absolute(&paths.data)?];
+        protected.extend(context.destinations.values().flatten().cloned());
         for skill in &manifest.skills {
             protected.extend(
                 skill
@@ -249,11 +322,63 @@ impl Plan {
                 };
             changes.insert(name.clone(), patch);
         }
+        for (name, snapshot) in &xcode_snapshots {
+            snapshot.verify(&target.xcode[name])?;
+            if let Some(entry) = old.xcode.get(name) {
+                crate::xcode::Snapshot::capture(&crate::xcode::skill_dir(paths, name, entry))?
+                    .verify(entry)?;
+            }
+            if old.xcode.get(name) != target.xcode.get(name) {
+                let previous = old
+                    .xcode
+                    .get(name)
+                    .map(|entry| crate::xcode::skill_dir(paths, name, entry));
+                changes.insert(
+                    format!("xcode:{name}"),
+                    snapshot.review(match &previous {
+                        Some(dir) if !dir.join("SKILL.md").is_file() => bail!("previous Xcode content for `{name}` is unavailable; cannot review its changes"),
+                        value => value.as_deref(),
+                    }, false)?,
+                );
+            }
+        }
+        for (name, entry) in &old.xcode {
+            if !target.xcode.contains_key(name) {
+                let previous = crate::xcode::skill_dir(paths, name, entry);
+                let snapshot = crate::xcode::Snapshot::capture(&previous)?;
+                snapshot.verify(entry)?;
+                changes.insert(
+                    format!("removed:xcode:{name}"),
+                    snapshot.review(None, true)?,
+                );
+            }
+        }
+        for (name, entry) in &old.skills {
+            if !target.skills.contains_key(name) {
+                let url = manifest::source_url(&entry.source)?;
+                let repo = git.ensure_commit(&url, &entry.commit)?;
+                let tree = if entry.subdir.is_empty() {
+                    entry.commit.clone()
+                } else {
+                    format!("{}:{}", entry.commit, entry.subdir)
+                };
+                changes.insert(
+                    format!("removed:{name}"),
+                    git.diff(
+                        &repo,
+                        &tree,
+                        "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+                        true,
+                    )?,
+                );
+            }
+        }
         let mut plan = Self {
-            version: 1,
+            version: 2,
             context,
             names,
             target,
+            xcode_snapshots,
             changes,
             checksum: String::new(),
         };

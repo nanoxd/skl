@@ -32,7 +32,8 @@ dotfiles history too.
 
 ## Saved update plans
 
-Save exact Git commits and full patches for review, then install those same commits:
+Save exact Git commits, wildcard membership, Xcode exports, and full patches for
+review, then install those same snapshots:
 
 ```sh
 skl update --plan ./skills-update.toml
@@ -54,8 +55,21 @@ paths, resolved destinations, exact target commits, and full Git patches. Applyi
 rejects changed context instead of resolving newer branch tips. Selected updates
 still reconcile the entire manifest, as ordinary `update` does: missing or stale
 lock entries are included in the plan, and local skills and links are reconciled.
-Local skill content is not snapshotted. Xcode manifests are not supported by saved
-plans; use ordinary `update` for those manifests.
+Wildcard repository membership is recorded alongside its exact pins. Apply does
+not rediscover membership or accept later additions, removals, or branch changes.
+
+Planning enabled, selected Xcode imports runs the exporter in disposable staging
+and embeds the normalized files, permissions, version, and content hashes in the
+plan. Apply verifies those hashes and installs the embedded content without
+running `xcrun`; changed or unavailable Xcode exports cannot alter reviewed content.
+Diffs include additions and removals. Previous cached Xcode content must be
+available and intact to review changes or removals; otherwise planning fails.
+Disabled imports and unrelated selected updates do not invoke the exporter.
+Local skill content is not snapshotted.
+
+Plans now use format version 2. Regenerate older plans; incompatible versions are
+rejected explicitly. Xcode payloads can make plans substantially larger than Git
+only plans.
 
 A failed planning run writes no plan. Apply uses the normal ownership checks and
 keeps previous installs for skills that fail; successful skills may still update.
