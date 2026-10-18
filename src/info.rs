@@ -27,6 +27,7 @@ pub struct Report {
     pub locked: Option<crate::lock::LockedSkill>,
     pub lock_matches: bool,
     pub xcode: Option<crate::lock::XcodeSkill>,
+    pub command: Option<crate::lock::CommandSkill>,
     pub content_path: Option<PathBuf>,
     pub content_available: bool,
     pub profiles: Vec<String>,
@@ -154,6 +155,7 @@ pub(crate) fn collect_loaded(
         locked: None,
         lock_matches: false,
         xcode: None,
+        command: None,
         content_path: None,
         content_available: false,
         profiles: vec![],
@@ -194,9 +196,17 @@ pub(crate) fn collect_loaded(
                 .map(|e| xcode::skill_dir(paths, name, e));
         } else {
             match &skill.origin {
-                Origin::Local(dir) => {
+                Origin::Local(dir) | Origin::OptionalLocal(dir) => {
                     report.origin = "local".into();
                     report.content_path = Some(dir.clone());
+                }
+                Origin::Command(origin) => {
+                    report.origin = "command".into();
+                    report.command = lock.commands.get(name).cloned();
+                    if let Some(entry) = lock.commands.get(name) {
+                        report.lock_matches = entry.producer == *origin;
+                        report.content_path = Some(crate::app::skill_dir(paths, name, entry));
+                    }
                 }
                 Origin::Git(origin) => {
                     report.origin = "git".into();
@@ -297,6 +307,12 @@ impl Report {
             } else {
                 println!("Lock: not locked");
             }
+        }
+        if let Some(entry) = &self.command {
+            println!(
+                "App version: {}\nContent digest: {}",
+                entry.snapshot.version, entry.snapshot.digest
+            );
         }
         if self.origin == "Xcode" {
             if let Some(entry) = &self.xcode {

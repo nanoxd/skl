@@ -387,7 +387,7 @@ fn rejects_bad_manifests() {
     env.write_manifest("[skills]\nx = { source = \"a/b\", path = \"c\" }\n");
     assert!(
         env.fails(&["sync"])
-            .contains("exactly one of `source` or `path`")
+            .contains("exactly one of `source`, `path` or `command`")
     );
     env.write_manifest("agents = [\"emacs\"]\n");
     assert!(env.fails(&["sync"]).contains("unknown agent `emacs`"));
@@ -2624,7 +2624,7 @@ fn add_local_collection_all_preserves_unique_hidden_skills_and_relative_paths() 
     assert!(
         fs::read_to_string(env.config("skills.lock"))
             .unwrap()
-            .contains("version = 1")
+            .contains("version = 2")
     );
 }
 
@@ -4825,4 +4825,346 @@ fn saved_plan_wildcard_exclusions_preserve_complete_coverage() {
         toml::from_str(&fs::read_to_string(e.config("skills.lock")).unwrap()).unwrap();
     assert!(lock["repositories"]["team"]["members"].get("a").is_some());
     assert!(lock["skills"].get("a").is_none());
+}
+
+fn fake_app() -> &'static Path {
+    static BIN: std::sync::OnceLock<TempDir> = std::sync::OnceLock::new();
+    BIN.get_or_init(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let output = Command::new("rustc")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/app.rs"
+            ))
+            .args(["--edition", "2021", "-o"])
+            .arg(dir.path().join("skl-test-app"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        dir
+    })
+    .path()
+}
+
+impl Env {
+    fn app_setup(&self, extra: &str, directory: bool) {
+        fs::write(
+            self.remotes.join("content"),
+            "# App skill
+version one
+",
+        )
+        .unwrap();
+        let export = if directory { ", '{output}'" } else { "" };
+        self.write_manifest(&format!(
+            "[skills]
+app = {{ command = ['skl-test-app', '{}'{export}], version-command = ['skl-test-app', '{}', '--version'], {extra} }}
+",
+            self.remotes.display(), self.remotes.display()
+        ));
+    }
+
+    fn app(&self, args: &[&str]) -> Output {
+        let path = std::env::join_paths(
+            std::iter::once(fake_app().to_path_buf())
+                .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap();
+        self.skl_with_env(
+            args,
+            &[("PATH", &path), ("SKL_TEST_SECRET", "secret".as_ref())],
+        )
+    }
+
+    fn app_ok(&self, args: &[&str]) -> String {
+        let out = self.app(args);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    }
+}
+
+#[test]
+fn command_snapshots_refresh_report_provenance_and_do_not_churn() {
+    for directory in [false, true] {
+        let env = Env::new();
+        env.app_setup("", directory);
+        env.app_ok(&["sync"]);
+        let lock = fs::read(env.config("skills.lock")).unwrap();
+        let target = fs::read_link(env.codex("app")).unwrap();
+        assert!(body(&target).contains("version one"));
+        assert!(String::from_utf8_lossy(&lock).contains("app 1.2.3"));
+        assert!(target.to_string_lossy().contains("/store/commands/"));
+        env.app_ok(&["sync"]);
+        assert_eq!(lock, fs::read(env.config("skills.lock")).unwrap());
+        fs::write(
+            env.remotes.join("content"),
+            "# App skill
+version two
+",
+        )
+        .unwrap();
+        let diff = env.app_ok(&["update", "--patch"]);
+        assert!(diff.contains("-version one"));
+        assert!(diff.contains("+version two"));
+        assert!(body(&env.codex("app")).contains("version two"));
+        env.app_ok(&["verify", "app"]);
+        fs::write(
+            env.remotes.join("content"),
+            "# App skill
+version three
+",
+        )
+        .unwrap();
+        let diff = env.app_ok(&["sync"]);
+        assert!(diff.contains("SKILL.md"));
+        assert!(diff.contains("insertion"));
+        assert!(!diff.contains("+version three"));
+    }
+}
+
+#[test]
+fn command_missing_unlinks_owned_links_preserves_lock_and_user_links() {
+    let env = Env::new();
+    env.app_setup("", false);
+    env.app_ok(&["sync"]);
+    let lock = fs::read(env.config("skills.lock")).unwrap();
+    let target = fs::read_link(env.codex("app")).unwrap();
+    fs::remove_file(env.claude("app")).unwrap();
+    let user = env.home.join("manual");
+    write_skill(&user, "app", "manual");
+    std::os::unix::fs::symlink(&user, env.claude("app")).unwrap();
+    let empty_path = env.home.join("empty-bin");
+    fs::create_dir(&empty_path).unwrap();
+    let out = env.skl_with_env(&["sync"], &[("PATH", empty_path.as_os_str())]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("unavailable"));
+    assert!(!env.codex("app").exists());
+    assert_eq!(fs::read_link(env.claude("app")).unwrap(), user);
+    assert_eq!(lock, fs::read(env.config("skills.lock")).unwrap());
+    assert!(target.exists());
+    fs::remove_file(env.claude("app")).unwrap();
+    // Locked uses the cache even without the executable.
+    assert!(
+        env.skl_with_env(&["sync", "--locked"], &[("PATH", empty_path.as_os_str())])
+            .status
+            .success()
+    );
+    assert_eq!(fs::read_link(env.codex("app")).unwrap(), target);
+}
+
+#[test]
+fn command_failures_preserve_previous_install() {
+    for (mode, directory) in [
+        ("fail", false),
+        ("version-fail", false),
+        ("descendant", false),
+        ("stderr", false),
+        ("timeout", false),
+        ("empty", false),
+        ("invalid", false),
+        ("symlink", true),
+        ("symlink-root", true),
+        ("escape", true),
+        ("fifo", true),
+        ("large-tree", true),
+        ("large", false),
+    ] {
+        let env = Env::new();
+        env.app_setup(
+            if matches!(mode, "timeout" | "descendant") {
+                "timeout = 1"
+            } else {
+                ""
+            },
+            directory,
+        );
+        env.app_ok(&["sync"]);
+        let lock = fs::read(env.config("skills.lock")).unwrap();
+        let target = fs::read_link(env.codex("app")).unwrap();
+        fs::write(env.remotes.join("mode"), mode).unwrap();
+        let out = env.app(&["update"]);
+        assert!(!out.status.success(), "{mode} should fail");
+        assert_eq!(lock, fs::read(env.config("skills.lock")).unwrap(), "{mode}");
+        assert_eq!(target, fs::read_link(env.codex("app")).unwrap(), "{mode}");
+        assert!(body(&target).contains("version one"));
+    }
+}
+
+#[test]
+fn command_locked_dry_run_read_only_and_configure_never_execute() {
+    let env = Env::new();
+    env.app_setup("", false);
+    env.app_ok(&["sync", "--dry-run"]);
+    env.app_ok(&["update", "--dry-run", "--patch"]);
+    assert!(!env.remotes.join("ran").exists());
+    assert!(!env.config("skills.lock").exists());
+    assert!(!env.home.join(".local/share/skl").exists());
+    assert!(!env.app(&["sync", "--locked"]).status.success());
+    env.app_ok(&["sync"]);
+    fs::remove_file(env.remotes.join("ran")).unwrap();
+    let lock = fs::read(env.config("skills.lock")).unwrap();
+    for args in [
+        vec!["sync", "--locked"],
+        vec!["sync", "--dry-run"],
+        vec!["update", "--dry-run", "--patch"],
+        vec!["list"],
+        vec!["list", "--json"],
+        vec!["info", "app"],
+        vec!["info", "app", "--json"],
+        vec!["doctor"],
+        vec!["verify"],
+        vec!["configure", "app", "--agent", "codex"],
+    ] {
+        env.app_ok(&args);
+        assert!(!env.remotes.join("ran").exists(), "{args:?}");
+        assert_eq!(lock, fs::read(env.config("skills.lock")).unwrap());
+    }
+}
+
+#[test]
+fn command_profile_os_gates_and_optional_paths() {
+    let env = Env::new();
+    env.app_setup("profiles = ['personal']", false);
+    env.app_ok(&["sync"]);
+    assert!(!env.remotes.join("ran").exists());
+    env.app_ok(&["--profile", "personal", "sync"]);
+    let lock = fs::read(env.config("skills.lock")).unwrap();
+    fs::remove_file(env.remotes.join("ran")).unwrap();
+    env.app_ok(&["sync"]);
+    assert!(!env.codex("app").exists());
+    assert_eq!(lock, fs::read(env.config("skills.lock")).unwrap());
+    let other = if cfg!(target_os = "macos") {
+        "linux"
+    } else {
+        "macos"
+    };
+    env.app_setup(&format!("os = ['{other}']"), false);
+    env.app_ok(&["sync"]);
+    assert!(!env.remotes.join("ran").exists());
+
+    env.write_manifest(
+        "[skills]
+app = { path = '~/bundled', optional = true }",
+    );
+    env.ok(&["sync"]);
+    write_skill(&env.home.join("bundled"), "app", "bundled");
+    env.ok(&["sync"]);
+    assert!(env.codex("app").exists());
+    fs::remove_dir_all(env.home.join("bundled")).unwrap();
+    env.ok(&["sync"]);
+    assert!(fs::symlink_metadata(env.codex("app")).is_err());
+    // An installed app with a malformed bundle is an error, not absence.
+    fs::create_dir(env.home.join("bundled")).unwrap();
+    env.fails(&["sync"]);
+}
+
+#[test]
+fn command_manifest_validation_and_locked_drift() {
+    let env = Env::new();
+    for entry in [
+        "command = []",
+        "command = 'echo hi'",
+        "command = ['echo'], path = '.'",
+        "command = ['echo'], source = 'a/b'",
+        "command = ['echo'], ref = 'main'",
+        "command = ['echo'], timeout = 0",
+        "command = ['echo'], optional = true",
+        "command = ['echo', '--out={output}']",
+        "command = ['./echo']",
+        "path = '.', version-command = ['echo']",
+    ] {
+        env.write_manifest(&format!(
+            "[skills]
+app = {{ {entry} }}"
+        ));
+        env.fails(&["list"]);
+    }
+    env.app_setup("", false);
+    env.app_ok(&["sync"]);
+    env.app_setup("timeout = 1", false);
+    fs::remove_file(env.remotes.join("ran")).unwrap();
+    assert!(!env.app(&["sync", "--locked"]).status.success());
+    assert!(!env.remotes.join("ran").exists());
+    assert!(!env.app(&["update", "--plan", "plan.json"]).status.success());
+}
+
+#[test]
+fn command_initial_failure_and_missing_app_never_publish_content() {
+    let env = Env::new();
+    env.app_setup("", false);
+    fs::write(env.remotes.join("mode"), "fail").unwrap();
+    assert!(!env.app(&["sync"]).status.success());
+    assert!(!env.codex("app").exists());
+    let lock = fs::read_to_string(env.config("skills.lock")).unwrap();
+    assert!(!lock.contains("commands.app"));
+    assert!(env.skl(&["sync"]).status.success());
+    assert!(!env.codex("app").exists());
+}
+
+#[test]
+fn command_permission_errors_and_missing_version_probe_preserve_snapshot() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = Env::new();
+    let bin = env.home.join("bin");
+    fs::create_dir(&bin).unwrap();
+    let executable = bin.join("app");
+    fs::copy(fake_app().join("skl-test-app"), &executable).unwrap();
+    fs::write(env.remotes.join("content"), "# skill\n").unwrap();
+    env.write_manifest(&format!(
+        "[skills]\napp = {{ command = ['{}', '{}'] }}",
+        executable.display(),
+        env.remotes.display()
+    ));
+    env.ok(&["sync"]);
+    let lock = fs::read(env.config("skills.lock")).unwrap();
+    let target = fs::read_link(env.codex("app")).unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(env.fails(&["sync"]).contains("not executable"));
+    assert_eq!(lock, fs::read(env.config("skills.lock")).unwrap());
+    assert_eq!(target, fs::read_link(env.codex("app")).unwrap());
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+    env.write_manifest(&format!(
+        "[skills]\napp = {{ command = ['{}', '{}'], version-command = ['skl-nonexistent-probe'] }}",
+        executable.display(),
+        env.remotes.display()
+    ));
+    assert!(env.fails(&["sync"]).contains("version-command"));
+    assert_eq!(lock, fs::read(env.config("skills.lock")).unwrap());
+    assert_eq!(target, fs::read_link(env.codex("app")).unwrap());
+}
+
+#[test]
+fn command_normalization_and_targeted_update() {
+    let env = Env::new();
+    env.app_setup("", false);
+    fs::write(
+        env.remotes.join("content"),
+        "---\nname: app\ndescription: Guide\n---\n# skill\n",
+    )
+    .unwrap();
+    env.app_ok(&["sync"]);
+    let lock = fs::read(env.config("skills.lock")).unwrap();
+    fs::write(
+        env.remotes.join("content"),
+        "---\ndescription: Guide\nname: app\n---\n# skill\n",
+    )
+    .unwrap();
+    env.app_ok(&["sync"]);
+    assert_eq!(lock, fs::read(env.config("skills.lock")).unwrap());
+    let mut manifest = fs::read_to_string(env.config("skills.toml")).unwrap();
+    manifest.push_str("local = { path = '~/local' }\n");
+    write_skill(&env.home.join("local"), "local", "local");
+    env.write_manifest(&manifest);
+    fs::remove_file(env.remotes.join("ran")).unwrap();
+    env.app_ok(&["update", "local"]);
+    assert!(!env.remotes.join("ran").exists());
+    assert_eq!(lock, fs::read(env.config("skills.lock")).unwrap());
 }

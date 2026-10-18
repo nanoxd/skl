@@ -7,6 +7,9 @@ File-based skill management for coding agents. Declare your skills in
 pinned Git versions and link them into Claude Code, Codex, and other agents.
 Keep the files in your dotfiles for your machines or in a project for your team.
 
+[App-provided skills](docs/app-skills.md) can refresh from installed CLIs on each
+sync; optional bundled paths skip machines without the app.
+
 ## Install
 
 With Homebrew (macOS or Linux):

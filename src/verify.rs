@@ -95,8 +95,9 @@ pub fn run(paths: &Paths, active: &Active, names: &[String], json_output: bool) 
         }
         let kind = match &skill.origin {
             Origin::Git(_) => "git",
+            Origin::Command(_) => "command",
             Origin::Local(_) if !explicit.contains(&skill.name) => "xcode",
-            Origin::Local(_) => "local",
+            Origin::Local(_) | Origin::OptionalLocal(_) => "local",
         };
         let mut observation = Observation {
             name: skill.name.clone(),
@@ -109,6 +110,21 @@ pub fn run(paths: &Paths, active: &Active, names: &[String], json_output: bool) 
         if skill.enabled(active) {
             let verified = (|| -> Result<Vec<Change>> {
                 match &skill.origin {
+                    Origin::Command(origin) => {
+                        let entry = lock
+                            .commands
+                            .get(&skill.name)
+                            .filter(|e| e.producer == *origin)
+                            .context("no matching command snapshot")?;
+                        let target = crate::app::skill_dir(paths, &skill.name, entry);
+                        observation.path = Some(std::path::absolute(&target)?);
+                        ensure_directory_chain(&paths.store(), &target)?;
+                        ensure!(
+                            xcode::content_digest(&target)? == entry.snapshot.digest,
+                            "command snapshot digest mismatch"
+                        );
+                        Ok(Vec::new())
+                    }
                     Origin::Git(origin) => {
                         let entry = lock
                             .skills
@@ -156,7 +172,7 @@ pub fn run(paths: &Paths, active: &Active, names: &[String], json_output: bool) 
                             }]
                         })
                     }
-                    Origin::Local(_) => {
+                    Origin::Local(_) | Origin::OptionalLocal(_) => {
                         bail!("local skills have no pinned content baseline");
                     }
                 }

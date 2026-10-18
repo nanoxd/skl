@@ -267,7 +267,7 @@ fn copy_tree(source: &Path, dest: &Path) -> Result<()> {
 
 /// Xcode serializes its frontmatter dictionary in an unstable order. Sort complete
 /// top-level fields, keeping multiline values intact. Leave unfamiliar YAML alone.
-fn normalize_frontmatter(text: &str) -> String {
+pub(crate) fn normalize_frontmatter(text: &str) -> String {
     let Some(rest) = text.strip_prefix("---\n") else {
         return text.into();
     };
@@ -399,17 +399,20 @@ impl Snapshot {
     }
 
     pub fn install(&self, paths: &Paths, name: &str, entry: &XcodeSkill) -> Result<()> {
+        self.install_at(&skill_dir(paths, name, entry), entry)
+    }
+
+    pub fn install_at(&self, dest: &Path, entry: &XcodeSkill) -> Result<()> {
         self.verify(entry)?;
-        let dest = skill_dir(paths, name, entry);
-        if let Ok(meta) = fs::symlink_metadata(&dest) {
+        if let Ok(meta) = fs::symlink_metadata(dest) {
             if !meta.is_dir() {
                 bail!(
                     "cached Xcode snapshot must be a directory: {}",
                     dest.display()
                 );
             }
-            if content_digest(&dest)? != entry.digest {
-                bail!("cached Xcode snapshot digest mismatch for `{name}`");
+            if content_digest(dest)? != entry.digest {
+                bail!("cached snapshot digest mismatch");
             }
             return Ok(());
         }
@@ -422,6 +425,10 @@ impl Snapshot {
     }
 
     pub fn review(&self, previous: Option<&Path>, reverse: bool) -> Result<String> {
+        self.diff(previous, reverse, true)
+    }
+
+    pub fn diff(&self, previous: Option<&Path>, reverse: bool, patch: bool) -> Result<String> {
         let stage = tempfile::tempdir()?;
         let before = stage.path().join("before");
         let after = stage.path().join("after");
@@ -433,13 +440,13 @@ impl Snapshot {
         self.materialize(&after)?;
         let mut command = Command::new("git");
         command.arg("diff");
+        command.arg(if patch { "--binary" } else { "--stat" });
         if reverse {
             command.arg("-R");
         }
         let output = command
             .args([
                 "--no-index",
-                "--binary",
                 "--no-ext-diff",
                 "--no-textconv",
                 "--",

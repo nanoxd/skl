@@ -47,12 +47,16 @@ A skill entry is either a source string or a table with these keys:
 | `ref`      | Branch, tag or full 40-character commit SHA. Defaults to the remote HEAD |
 | `subdir`   | Directory in the repo that holds `SKILL.md`. Found by name when unset    |
 | `repository` | Repository group alias; see [repository groups](#repository-groups) |
+| `command`  | Argv array producing a skill; see [app-provided skills](app-skills.md) |
+| `version-command` | Optional argv array recording the installed app version |
+| `timeout` | Command deadline in seconds, 1–300; default 30 per invocation |
+| `optional` | For `path` only: skip and unlink owned links when the directory is absent |
 | `path`     | A local skill directory, linked in place                                 |
 | `agents`   | Agents for this skill, replacing the top-level list                      |
 | `profiles` | Non-empty list of profiles for this skill. Unset means every machine     |
 | `os`       | Non-empty list of `macos` and/or `linux`. Unset means either OS           |
 
-Set exactly one of `source`, `path`, or `repository`. `repository` refers to a
+Set exactly one of `source`, `path`, `command`, or `repository`. `repository` refers to a
 [repository group](#repository-groups). `ref` and `subdir` apply to Git sources,
 including repository references.
 A `source` can be:
@@ -165,3 +169,13 @@ subdir = "skills/review"
 `sync` installs the locked commit until you run `skl update`. Editing a skill's
 `source`, `ref` or `subdir` in the manifest makes `sync` resolve it again. Local
 `path` skills aren't locked.
+
+Command entries use the same agents, profiles, and OS settings. `skl configure`
+edits these settings while preserving command argv; edit commands themselves in
+the manifest. Only explicit `sync` and `update` execute manifest commands.
+Automatic sync after other editing commands defers imports until that explicit run.
+
+Lock version 2 adds command producers, version output, and content digests in
+`[commands]`. Version 1 locks remain readable and migrate when next written.
+`sync --locked` leaves a version 1 lock untouched. Command snapshots are local
+provenance, not downloadable pins: another machine needs a normal sync first.

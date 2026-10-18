@@ -170,7 +170,15 @@ pub fn collect(paths: &Paths, active: &Active) -> Result<Vec<Diagnostic>> {
             selected.insert(agent.dir.join(&skill.name));
         }
         let (target, cached) = match &skill.origin {
-            Origin::Local(dir) => (dir.clone(), !local_names.contains(&skill.name)),
+            Origin::Local(dir) | Origin::OptionalLocal(dir) => {
+                (dir.clone(), !local_names.contains(&skill.name))
+            }
+            Origin::Command(_) => {
+                let Some(entry) = lock.commands.get(&skill.name) else {
+                    continue;
+                };
+                (crate::app::skill_dir(paths, &skill.name, entry), true)
+            }
             Origin::Git(origin) => {
                 let Some(entry) = lock.skills.get(&skill.name).filter(|e| e.matches(origin)) else {
                     issue(

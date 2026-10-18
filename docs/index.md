@@ -41,6 +41,7 @@ on each machine; see [storage and safety](storage-and-safety.md).
 | Choose agents, profiles, or operating systems | [Agents and machine selection](agents-and-profiles.md) |
 | Share skills with a team | [Project skills](projects.md) |
 | Review changes before updating | [Reviewing updates](updates.md) |
+| Follow installed app skills | [App-provided skills](app-skills.md) |
 | Import Apple's skills | [Xcode skills](xcode.md) |
 | Install skl in CI | [GitHub Actions](github-actions.md) |
 

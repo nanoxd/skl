@@ -18,6 +18,13 @@ skill-creator = { source = "anthropics/skills", subdir = "skills/skill-creator" 
 # Restrict a skill to an agent and a machine profile.
 # notes = { source = "your-org/agent-skills", subdir = "skills/notes", agents = ["codex"], profiles = ["work"] }
 
+# Trusted app commands refresh on explicit sync/update. Never run in dry runs.
+# cmux = { command = ["cmux", "--skill"], version-command = ["cmux", "--version"], os = ["macos"] }
+# orca-cli = { command = ["orca", "skills", "get", "orca-cli"], os = ["macos"] }
+# rocketsim = { path = "/Applications/RocketSim.app/Contents/Resources/Agent-Skill/rocketsim", optional = true, os = ["macos"] }
+# For an exporter, pass "{output}" as a whole argument naming its destination.
+# app = { command = ["my-app", "export-skill", "{output}"], timeout = 60 }
+
 # Declare a repository once and select several skills.
 # [repositories.team]
 # source = "your-org/agent-skills"

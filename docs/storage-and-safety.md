@@ -49,6 +49,7 @@ SSH keys and credential helpers you already have.
 ~/.local/share/skl/
   store/<repo>/<commit>/<dir>   each skill's files at its locked commit
   store/xcode/<digest>/<name>  selected Xcode skill snapshots
+  store/commands/<digest>/<name>  app command snapshots
   repos/                        git caches, so updates only fetch what changed
   state.toml                    the links skl created
   profile                       this machine's profiles
@@ -76,3 +77,40 @@ are treated as unset. XDG directory values must be absolute; relative values are
 ignored and the defaults above are used. These rules apply on both Linux and macOS.
 Agent skill directories remain at the locations documented above; use a custom
 `agents` path to change them.
+
+## Trusting app commands
+
+A manifest with `command` or `version-command` is executable configuration.
+Review changes to these arrays before running `sync` or `update`, especially in
+a cloned project or shared dotfiles. Both commands run with your user permissions.
+An argv array can explicitly invoke an interpreter; there is no command allowlist.
+These limits reduce accidental damage and resource use; they are **not an OS
+sandbox** and cannot contain a malicious program.
+
+skl invokes argv directly, without a shell or shell interpolation. Only a complete
+`{output}` argument is replaced by the export directory. Executables must be an
+absolute path or a name found on the inherited PATH; relative PATH components are
+discarded. Commands run in a fresh temporary working directory with stdin closed.
+Their environment contains only the filtered PATH, HOME and TMPDIR pointing to
+that temporary directory, and LANG/LC_ALL set to C. Credentials, app configuration variables, and
+the real HOME are not inherited. Apps requiring a logged-in session or configuration
+may need a separately maintained, trusted executable adapter.
+
+Each invocation has a 30-second deadline (configurable from 1 to 300 seconds) and
+an 8 MiB limit on each of stdout and stderr. Exports are checked during execution
+and after completion for a 32 MiB total size, 4096 entries, and 64 levels of
+nesting. These are polling limits, not filesystem quotas. On completion or
+failure, skl terminates the command's process group; deliberately detached
+processes are outside this protection.
+
+Imported trees must have a regular-file, nonempty UTF-8 `SKILL.md`. Symlinks,
+special files, and special permission bits are rejected. Snapshots are normalized,
+hashed, staged, and atomically published using the Xcode snapshot machinery.
+Failures retain the last working lock and links. Missing executables instead
+remove only owned links and retain their lock and cached snapshot.
+
+Read-only commands, dry runs (including `update --dry-run --patch`), and locked
+syncs never invoke manifest commands. Locked syncs verify and use cached snapshots.
+There is no safe general preview of an arbitrary command's side effects; run a
+normal sync/update to generate and display its content diff. Saved update plans
+currently reject manifests containing command imports.

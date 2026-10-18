@@ -19,6 +19,7 @@ use crate::profile::Active;
 #[derive(Default)]
 pub struct Options {
     pub dry_run: bool,
+    pub run_commands: bool,
     pub force: bool,
     /// Fail instead of changing the lock, for checking that a machine matches it.
     pub locked: bool,
@@ -33,6 +34,16 @@ pub struct Options {
 /// Brings the lock, the store and every agent's links in line with the manifest.
 /// Returns false when some skill or link couldn't be put in place.
 pub fn run(paths: &Paths, active: &Active, opts: &Options) -> Result<bool> {
+    if opts.plan.is_some() || opts.apply_plan.is_some() {
+        let manifest = manifest::load(paths)?;
+        if manifest
+            .skills
+            .iter()
+            .any(|s| matches!(s.origin, Origin::Command(_)))
+        {
+            bail!("saved update plans do not support command imports; use sync or update");
+        }
+    }
     let temporary = (opts.dry_run || opts.plan.is_some())
         .then(tempfile::tempdir)
         .transpose()?;
@@ -53,6 +64,7 @@ pub fn run(paths: &Paths, active: &Active, opts: &Options) -> Result<bool> {
         .transpose()?;
     let options = Options {
         dry_run: opts.dry_run || opts.plan.is_some(),
+        run_commands: opts.run_commands,
         force: opts.force,
         locked: opts.locked,
         patch: opts.patch,
@@ -322,7 +334,7 @@ fn run_inner(
         .filter(|s| enabled(s))
         .filter_map(|s| match &s.origin {
             Origin::Git(origin) => Some((s, origin)),
-            Origin::Local(_) => None,
+            _ => None,
         })
         .collect();
     let stale: Vec<&(&Skill, &GitOrigin)> = git_skills
@@ -411,6 +423,7 @@ fn run_inner(
     // network never drops it.
     let mut lock = Lock {
         version: old_lock.version,
+        commands: BTreeMap::new(),
         repositories: repository_entries,
         xcode_all_complete,
         xcode: xcode_entries,
@@ -527,9 +540,92 @@ fn run_inner(
         }
     }
 
+    let mut unavailable = BTreeSet::new();
+    for skill in &manifest.skills {
+        let Origin::Command(origin) = &skill.origin else {
+            continue;
+        };
+        let name = &skill.name;
+        let old = old_lock.commands.get(name);
+        if let Some(entry) = old {
+            lock.commands.insert(name.clone(), entry.clone());
+        }
+        if !enabled(skill) {
+            continue;
+        }
+        if opts.locked {
+            let entry = old
+                .filter(|e| e.producer == *origin)
+                .with_context(|| format!("{name}: command snapshot is not locked; run skl sync"))?;
+            let dir = crate::app::skill_dir(paths, name, entry);
+            crate::xcode::Snapshot::capture(&dir)?
+                .verify(&entry.snapshot)
+                .with_context(|| format!("{name}: command snapshot is not cached or valid"))?;
+        } else if opts.dry_run || !opts.run_commands {
+            out.note(format!(
+                "{name}: command import requires an explicit sync or update without --dry-run"
+            ));
+            failed.insert(name.clone());
+        } else if opts
+            .update
+            .as_ref()
+            .is_none_or(|names| names.is_empty() || names.contains(name))
+        {
+            let result = crate::app::import(origin).and_then(|result| {
+                let Some((entry, snapshot)) = result else {
+                    return Ok(None);
+                };
+                let previous = old.map(|e| crate::app::skill_dir(paths, name, e));
+                let changed = old != Some(&entry);
+                let diff = if changed {
+                    snapshot.diff(
+                        previous.as_deref().filter(|p| p.is_dir()),
+                        false,
+                        opts.patch,
+                    )?
+                } else {
+                    String::new()
+                };
+                snapshot
+                    .install_at(&crate::app::skill_dir(paths, name, &entry), &entry.snapshot)?;
+                if changed {
+                    out.event(
+                        if old.is_some() { '~' } else { '+' },
+                        name,
+                        format!("command {}", entry.snapshot.version),
+                    );
+                    out.block(&diff);
+                }
+                Ok(Some(entry))
+            });
+            match result {
+                Ok(Some(entry)) => {
+                    lock.commands.insert(name.clone(), entry);
+                }
+                Ok(None) => {
+                    out.note(format!("{name}: app unavailable; skipping"));
+                    unavailable.insert(name.clone());
+                }
+                Err(err) => {
+                    out.error(name, &format!("{err:#}"));
+                    failed.insert(name.clone());
+                }
+            }
+        } else if old.is_none() {
+            failed.insert(name.clone());
+        }
+    }
+    // Version 1 remains byte-for-byte stable for locked legacy installs.
+    if !opts.locked && (!lock.commands.is_empty() || old_lock.version >= crate::lock::VERSION) {
+        lock.version = crate::lock::VERSION;
+    }
+
     // A skill that failed keeps its previous lock entry, store content and links, so a
     // flaky network or a broken upstream never uninstalls something that worked.
     for name in &failed {
+        if let Some(entry) = old_lock.commands.get(name) {
+            lock.commands.insert(name.clone(), entry.clone());
+        }
         match old_lock.skills.get(name) {
             Some(old) => lock.skills.insert(name.clone(), old.clone()),
             None => lock.skills.remove(name),
@@ -540,6 +636,9 @@ fn run_inner(
     // Work out where every link should point.
     let mut desired = BTreeMap::new();
     for skill in manifest.skills.iter().filter(|s| enabled(s)) {
+        if unavailable.contains(&skill.name) {
+            continue;
+        }
         if failed.contains(&skill.name) {
             for agent in &skill.agents {
                 let link = agent.dir.join(&skill.name);
@@ -550,11 +649,23 @@ fn run_inner(
             continue;
         }
         let target = match &skill.origin {
+            Origin::Command(_) => {
+                let Some(entry) = lock.commands.get(&skill.name) else {
+                    continue;
+                };
+                crate::app::skill_dir(paths, &skill.name, entry)
+            }
+            Origin::OptionalLocal(dir)
+                if fs::metadata(dir).is_err_and(|e| e.kind() == ErrorKind::NotFound) =>
+            {
+                out.note(format!("{}: app path unavailable; skipping", skill.name));
+                continue;
+            }
             Origin::Git(origin) => {
                 let entry = &lock.skills[&skill.name];
                 skill_dir(&origin.url, &entry.commit, &entry.subdir)
             }
-            Origin::Local(dir) => {
+            Origin::Local(dir) | Origin::OptionalLocal(dir) => {
                 let embedded_content = embedded
                     .is_some_and(|snapshots| snapshots.contains_key(&skill.name))
                     || planning && snapshots.contains_key(&skill.name);
@@ -925,6 +1036,9 @@ fn collect_garbage(paths: &Paths, lock: &Lock, state: &State) -> Result<()> {
             Some((git::cache_key(&url), l.commit.clone()))
         })
         .collect();
+    for entry in lock.commands.values() {
+        live.insert(("commands".into(), entry.snapshot.digest.clone()));
+    }
     for entry in lock.xcode.values() {
         live.insert(("xcode".into(), entry.digest.clone()));
     }

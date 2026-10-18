@@ -6,6 +6,10 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- App command imports with version provenance, content snapshots, bounded execution,
+  cached locked syncs, and content diffs. Optional bundled paths skip absent apps.
+  Version 2 locks read and migrate existing version 1 locks.
+
 - Offline `verify [NAME ...] [--json]` for cached Git content and Xcode digests,
   reporting drift and unavailable baselines without modifying installations.
 
