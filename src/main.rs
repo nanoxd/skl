@@ -1,5 +1,6 @@
 mod adopt;
 mod agents;
+mod app;
 mod discover;
 mod doctor;
 mod git;
@@ -394,6 +395,7 @@ fn run(cli: Cli) -> Result<bool> {
                 force,
                 locked,
                 patch,
+                run_commands: true,
                 update: None,
                 ..Default::default()
             },
@@ -412,6 +414,7 @@ fn run(cli: Cli) -> Result<bool> {
                 patch,
                 plan,
                 apply_plan,
+                run_commands: true,
                 update: Some(names),
                 ..Default::default()
             },
@@ -866,6 +869,12 @@ fn list(paths: &Paths, active: &Active) -> Result<bool> {
     }
     for skill in &manifest.skills {
         let (origin, version) = match &skill.origin {
+            Origin::Command(origin) => (
+                format!("command: {}", origin.command[0]),
+                lock.commands
+                    .get(&skill.name)
+                    .map_or_else(|| "not imported".into(), |e| e.snapshot.version.clone()),
+            ),
             Origin::Git(o) => {
                 let version = lock
                     .skills
@@ -882,7 +891,7 @@ fn list(paths: &Paths, active: &Active) -> Result<bool> {
                     );
                 (o.source.clone(), version)
             }
-            Origin::Local(dir) => match lock.xcode.get(&skill.name) {
+            Origin::Local(dir) | Origin::OptionalLocal(dir) => match lock.xcode.get(&skill.name) {
                 Some(entry) if *dir == xcode::skill_dir(paths, &skill.name, entry) => {
                     ("Xcode".into(), entry.version.replace('\n', " / "))
                 }

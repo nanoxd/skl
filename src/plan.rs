@@ -84,7 +84,7 @@ impl Context {
                     .map(|a| absolute(&a.dir))
                     .collect::<Result<Vec<_>>>()?,
             );
-            if let Origin::Local(dir) = skill.origin {
+            if let Origin::Local(dir) | Origin::OptionalLocal(dir) = skill.origin {
                 local_paths.insert(skill.name, absolute(&dir)?);
             }
         }
@@ -289,7 +289,7 @@ impl Plan {
                     .map(|a| absolute(&a.dir))
                     .collect::<Result<Vec<_>>>()?,
             );
-            if let Origin::Local(dir) = &skill.origin {
+            if let Origin::Local(dir) | Origin::OptionalLocal(dir) = &skill.origin {
                 protected.push(absolute(dir)?);
             }
         }

@@ -68,6 +68,17 @@ impl Skill {
 pub enum Origin {
     Git(GitOrigin),
     Local(PathBuf),
+    OptionalLocal(PathBuf),
+    Command(CommandOrigin),
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandOrigin {
+    pub command: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_command: Option<Vec<String>>,
+    pub timeout: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -200,6 +211,22 @@ pub(crate) fn parse_skill(
     let local = take_str("path")?;
     let git_ref = take_str("ref")?;
     let subdir = take_str("subdir")?;
+    let command = argv(table.remove("command"), "command")?;
+    let version_command = argv(table.remove("version-command"), "version-command")?;
+    let has_timeout = table.contains_key("timeout");
+    let timeout = match table.remove("timeout") {
+        None => 30,
+        Some(Value::Integer(n)) if (1..=300).contains(&n) => n as u64,
+        Some(_) => bail!("timeout must be an integer from 1 to 300 seconds"),
+    };
+    let optional = match table.remove("optional") {
+        None => false,
+        Some(Value::Boolean(value)) if local.is_some() => value,
+        Some(_) => bail!("optional is a boolean for path skills only"),
+    };
+    if command.is_none() && (version_command.is_some() || has_timeout) {
+        bail!("version-command and timeout require command");
+    }
     let agents = match table.remove("agents") {
         Some(value) => agent_list(&value, "agents", paths)?,
         None => default_agents.to_vec(),
@@ -242,15 +269,29 @@ pub(crate) fn parse_skill(
         bail!("unknown key `{key}`");
     }
 
-    let origin = match (source, local) {
-        (Some(source), None) => git_origin(source, git_ref, subdir)?,
-        (None, Some(local)) => {
+    let origin = match (source, local, command) {
+        (Some(source), None, None) => git_origin(source, git_ref, subdir)?,
+        (None, Some(local), None) => {
             if git_ref.is_some() || subdir.is_some() {
                 bail!("`ref` and `subdir` only apply to `source`");
             }
-            Origin::Local(paths.expand(&local))
+            if optional {
+                Origin::OptionalLocal(paths.expand(&local))
+            } else {
+                Origin::Local(paths.expand(&local))
+            }
         }
-        _ => bail!("set exactly one of `source` or `path`"),
+        (None, None, Some(command)) => {
+            if git_ref.is_some() || subdir.is_some() {
+                bail!("ref and subdir only apply to Git sources");
+            }
+            Origin::Command(CommandOrigin {
+                command,
+                version_command,
+                timeout,
+            })
+        }
+        _ => bail!("set exactly one of `source`, `path` or `command`"),
     };
     Ok(Skill {
         name: name.into(),
@@ -329,4 +370,34 @@ fn agent_list(value: &Value, key: &str, paths: &Paths) -> Result<Vec<Agent>> {
         }
     }
     Ok(agents)
+}
+
+fn argv(value: Option<Value>, key: &str) -> Result<Option<Vec<String>>> {
+    let Some(value) = value else { return Ok(None) };
+    let Value::Array(items) = value else {
+        bail!("{key} must be an argv array")
+    };
+    let args = items
+        .into_iter()
+        .map(|v| match v {
+            Value::String(s) if !s.contains('\0') => Ok(s),
+            _ => bail!("{key} must contain strings without NUL bytes"),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if args.first().is_none_or(|s| s.is_empty() || s == "{output}") {
+        bail!("{key} requires an executable");
+    }
+    if args[0].contains('/') && !std::path::Path::new(&args[0]).is_absolute() {
+        bail!("{key} executable must be absolute or a name on PATH");
+    }
+    if key == "version-command" && args.iter().any(|s| s.contains("{output}")) {
+        bail!("version-command cannot use {{output}}");
+    }
+    if args
+        .iter()
+        .any(|s| s.contains("{output}") && s != "{output}")
+    {
+        bail!("{{output}} must occupy a whole argument");
+    }
+    Ok(Some(args))
 }
