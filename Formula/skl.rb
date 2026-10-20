@@ -7,23 +7,23 @@ class Skl < Formula
 
   on_macos do
     on_arm do
-      url "https://github.com/nanoxd/skl/releases/download/v0.3.0/skl-aarch64-apple-darwin.tar.gz"
-      sha256 "9671d8dc5f15616be35075f6d567a41b113717916ef5b2b0f98ae51650504a9e"
+      url "https://github.com/nanoxd/skl/releases/download/v0.4.0/skl-aarch64-apple-darwin.tar.gz"
+      sha256 "c223db024d7fa12681e98363d05ced687dda8873a0a6a66f9516d898ce22d2fc"
     end
     on_intel do
-      url "https://github.com/nanoxd/skl/releases/download/v0.3.0/skl-x86_64-apple-darwin.tar.gz"
-      sha256 "90a9a1933157c234fd6aaccde49bfa8ceb83cdafe3639e4f0d9b3da6ca6a737e"
+      url "https://github.com/nanoxd/skl/releases/download/v0.4.0/skl-x86_64-apple-darwin.tar.gz"
+      sha256 "2715392083ff23bdf4e287917b8b6fda3a6c05f7efe01d3934e6840918565c83"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/nanoxd/skl/releases/download/v0.3.0/skl-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "08f87dc16eb645643b918bc276219a49bf573de8f75ca8935c7a30fc04202ab4"
+      url "https://github.com/nanoxd/skl/releases/download/v0.4.0/skl-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "299a396c190d2ffb1d276f405ca4717c903360f63e5c9dab258140f400308d6f"
     end
     on_intel do
-      url "https://github.com/nanoxd/skl/releases/download/v0.3.0/skl-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "c2d5ac9c43e77db4c900a27ac81d9afe7d0e597e68d797316d6a0f69c5232e43"
+      url "https://github.com/nanoxd/skl/releases/download/v0.4.0/skl-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "ff3a98b9505f9e4db74887315827f5829ef32cc188d170826c409bf067c9fa41"
     end
   end
 
