@@ -13,6 +13,7 @@ Commands: `sync`, `update`, `add`, `remove`, `list`, `profile`, `agents`. Skills
 - `src/main.rs`: clap CLI, `add`/`remove` (edit the manifest with `toml_edit` to keep comments), `list` (including skills skl doesn't manage), `profile`, the run lock, and `write_atomic`.
 - `src/sync.rs`: the sync engine. Resolves refs, builds the new lock, unpacks skills into the store, reconciles links against `state.toml`, and garbage-collects unused store commits and repo caches.
 - `src/app.rs`: bounded direct-argv app imports, temporary environment, and command snapshots.
+- `src/export.rs`: app sources (a `command` export or a known `app` such as Xcode), their member snapshots, digests, and frontmatter normalization.
 - `src/git.rs`: every git call (`ls-remote`, update diffs, bare cache repos, shallow fetch of one commit, `ls-tree`, `archive` piped to `tar`). Skill discovery and frontmatter `name` parsing.
 - `src/manifest.rs`: parses and validates `skills.toml` (git `source`/`ref`/`subdir`, local `path`, per-skill `agents` and `profiles`).
 - `src/lock.rs`: the versioned lockfile.
@@ -50,10 +51,10 @@ These are tested in `tests/cli.rs` and must hold after any change.
 - Only remove or repoint links recorded in `state.toml` with the target they still have. Anything else at a link path, including a user link into the store, is a conflict that is skipped unless `--force` moves it into a fresh directory under `<data>/backup`. Backups never overwrite each other.
 - Record links in `state.toml` before creating them, so an interrupted run still knows what it owns.
 - Never publish a store directory without a regular-file `SKILL.md`. Unpack to a temp directory and rename into place.
-- A skill that fails to resolve, fetch or unpack keeps its previous lock entry, store content and links. A missing ordinary local skill keeps its links. Missing command executables and absent optional local directories remove only owned links; command lock entries and snapshots stay cached.
+- A skill that fails to resolve, fetch or unpack keeps its previous lock entry, store content and links. A missing ordinary local skill keeps its links. Missing command executables, unavailable apps (including a Mac without Xcode), and absent optional local directories remove only owned links; command lock entries and snapshots stay cached.
 - Garbage collection keeps every store commit and repo cache referenced by the lock or by an owned link.
 - `--locked` fails rather than changing the lock.
-- Manifest commands run only during explicit sync/update, never in dry runs, locked syncs, read-only commands, or automatic sync after edits. Command failure preserves the previous install; imports reject symlinks and special files and obey time/output limits.
+- Manifest commands, including app source exports, run only during explicit sync/update, never in dry runs, locked syncs, read-only commands, or automatic sync after edits. Saved plans run only built-in app exports such as Xcode. Command failure preserves the previous install; imports reject symlinks and special files and obey time/output limits.
 
 ## Tests
 

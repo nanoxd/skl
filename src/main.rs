@@ -3,6 +3,7 @@ mod agents;
 mod app;
 mod discover;
 mod doctor;
+mod export;
 mod git;
 mod info;
 mod interactive;
@@ -17,7 +18,6 @@ mod search;
 mod source;
 mod sync;
 mod verify;
-mod xcode;
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -164,7 +164,7 @@ enum Command {
         names: Vec<String>,
         #[command(flatten)]
         options: SkillOptions,
-        /// Inherit the manifest default agents
+        /// Inherit the default agents: the source's, or the manifest's
         #[arg(long, conflicts_with = "agents")]
         default_agents: bool,
         /// Remove operating-system restrictions
@@ -244,6 +244,47 @@ impl SkillOptions {
             profile::validate(profile)?;
         }
         Ok(())
+    }
+
+    /// The settings a source's member needs beyond the declaration's defaults.
+    fn beyond(&self, declaration: &repositories::Declaration) -> Self {
+        let keep = |key: &str, values: &Vec<String>| {
+            let inherited = declaration
+                .defaults
+                .get(key)
+                .is_some_and(|defaults| defaults.iter().eq(values.iter().collect::<BTreeSet<_>>()));
+            if inherited {
+                Vec::new()
+            } else {
+                values.clone()
+            }
+        };
+        Self {
+            agents: keep("agents", &self.agents),
+            os: keep("os", &self.os),
+            only_profiles: keep("profiles", &self.only_profiles),
+        }
+    }
+
+    /// The declaration's defaults a member keeps because these options don't replace them.
+    fn inherited(&self, declaration: &repositories::Declaration) -> Vec<String> {
+        [
+            ("agents", &self.agents),
+            ("os", &self.os),
+            ("profiles", &self.only_profiles),
+        ]
+        .into_iter()
+        .filter(|(_, own)| own.is_empty())
+        .filter_map(|(key, _)| {
+            let values: Vec<_> = declaration
+                .defaults
+                .get(key)?
+                .iter()
+                .map(|v| format!("{v:?}"))
+                .collect();
+            Some(format!("{key} = [{}]", values.join(", ")))
+        })
+        .collect()
     }
 
     fn apply(&self, item: &mut Item, resets: [bool; 3]) -> Result<()> {
@@ -607,7 +648,20 @@ fn add(
     } else {
         std::env::current_dir()?.join(source)
     };
-    let entries: Vec<(String, Item)> = if local.is_dir() {
+    let mut doc = read_manifest_doc(paths)?;
+    let declarations = repositories::declarations(&doc);
+    // A directory that a declared source names is that Git repository.
+    let declared = if local.is_dir() {
+        let dir = std::path::absolute(&local)?;
+        declarations
+            .iter()
+            .filter_map(|d| d.source.as_deref())
+            .find(|s| s.starts_with('/') && std::path::Path::new(s) == dir)
+    } else {
+        None
+    };
+    let source = declared.unwrap_or(source);
+    let entries: Vec<(String, Entry)> = if local.is_dir() && declared.is_none() {
         if git_ref.is_some() || subdir.is_some() {
             bail!("--ref and --subdir do not apply to local directories");
         }
@@ -686,13 +740,18 @@ fn add(
             .map(|(name, dir)| {
                 let mut table = InlineTable::new();
                 table.insert("path", paths.manifest_path(&dir).into());
-                (name, value(table))
+                (name, Entry::Own(value(table)))
             })
             .collect()
     } else {
         let url = manifest::source_url(source)?;
         let git = Git::new(paths.repos());
-        let commit = input.resolve(&git, &url)?;
+        let group = join_group(&declarations, &git, &url, source, git_ref.as_deref())?;
+        // Without a ref of its own, a member is checked at the ref it will inherit.
+        let commit = match group.and_then(|(declaration, _)| declaration.git_ref.as_deref()) {
+            Some(inherited) if git_ref.is_none() => git.resolve(&url, Some(inherited))?,
+            _ => input.resolve(&git, &url)?,
+        };
         let repo = git.ensure_commit(&url, &commit)?;
         let candidates = git.candidates_in(&repo, &commit, subdir.as_deref())?;
         let names: Vec<String> = if all {
@@ -745,9 +804,42 @@ fn add(
                 );
             }
         }
+        // A member found by name elsewhere in the repository keeps its directory.
+        let everywhere = match (group, subdir) {
+            (Some(_), Some(_)) => git.candidates(&repo, &commit)?,
+            _ => Vec::new(),
+        };
+        let all = if subdir.is_some() {
+            &everywhere
+        } else {
+            &candidates
+        };
         names
             .into_iter()
             .map(|name| {
+                if let Some((declaration, own_ref)) = group {
+                    let mut table = InlineTable::new();
+                    table.insert("source", declaration.alias.as_str().into());
+                    if let Some(r) = git_ref.as_deref().filter(|_| own_ref) {
+                        table.insert("ref", r.into());
+                    }
+                    if let Some(dir) = subdir {
+                        let exact = if dir == "." { "" } else { dir.as_str() };
+                        if !matches!(git::matching(&everywhere, &name)[..], [one] if one.subdir == exact)
+                        {
+                            table.insert("subdir", dir.as_str().into());
+                        }
+                    }
+                    let options = options.beyond(declaration);
+                    let entry = Entry::Member {
+                        alias: declaration.alias.clone(),
+                        item: value(table),
+                        inherits: options.inherited(declaration),
+                        options,
+                        discovered: all.iter().any(|c| c.name == name),
+                    };
+                    return (name, entry);
+                }
                 let item = match (git_ref, subdir) {
                     (None, None) => value(source),
                     (reference, directory) => {
@@ -762,17 +854,21 @@ fn add(
                         value(table)
                     }
                 };
-                (name, item)
+                (name, Entry::Own(item))
             })
             .collect()
     };
 
-    let mut doc = read_manifest_doc(paths)?;
-    let table = skills_table(&mut doc)?;
+    let coverage = Lock::load(&paths.lock())?.repositories;
     let mut added = 0;
-    for (name, mut item) in entries {
+    for (name, entry) in entries {
         manifest::validate_name(&name)?;
-        if table.contains_key(&name) {
+        // Read the edited document so a name repeated in one command joins once.
+        if doc.get("skills").and_then(|s| s.get(&name)).is_some()
+            || repositories::declarations(&doc)
+                .iter()
+                .any(|d| d.selects(&name, &coverage))
+        {
             if !options.agents.is_empty()
                 || !options.os.is_empty()
                 || !options.only_profiles.is_empty()
@@ -785,8 +881,54 @@ fn add(
             }
             continue;
         }
-        options.apply(&mut item, [false; 3])?;
-        table.insert(&name, item);
+        match entry {
+            Entry::Own(mut item) => {
+                options.apply(&mut item, [false; 3])?;
+                insert_entry(skills_table(&mut doc)?, &name, item);
+            }
+            Entry::Member {
+                alias,
+                mut item,
+                options,
+                discovered,
+                inherits,
+            } => {
+                options.apply(&mut item, [false; 3])?;
+                let overrides = item.as_inline_table().is_some_and(|t| t.len() > 1);
+                let group = repositories::declaration_mut(&mut doc, &alias)
+                    .context("source declarations must be tables")?;
+                let wildcard = group.get("skills").and_then(Item::as_str) == Some("*");
+                let restored = wildcard
+                    && group
+                        .get_mut("exclude")
+                        .and_then(Item::as_array_mut)
+                        .is_some_and(|list| repositories::remove_name(list, &name));
+                // Each name appears once: in the source's list while it inherits
+                // everything, otherwise as its own `source` entry. A wildcard
+                // selects discovered names, never directory names.
+                let list = group.get_mut("skills").and_then(Item::as_array_mut);
+                if overrides {
+                    insert_entry(skills_table(&mut doc)?, &name, item);
+                } else if (wildcard && !discovered) || (!wildcard && list.is_none()) {
+                    // A bare reference takes the string form, like `name = "owner/repo"`.
+                    insert_entry(skills_table(&mut doc)?, &name, value(alias.as_str()));
+                } else if let Some(list) = list {
+                    repositories::insert_name(list, &name);
+                } else if !restored {
+                    println!("= {name} is already selected by source `{alias}`");
+                    continue;
+                }
+                // Inherited restrictions can narrow where a skill installs, so show them.
+                if inherits.is_empty() {
+                    println!("Added {name} to source `{alias}`");
+                } else {
+                    println!(
+                        "Added {name} to source `{alias}`, inheriting {}",
+                        inherits.join(", ")
+                    );
+                }
+            }
+        }
         added += 1;
     }
     manifest::parse(&doc.to_string(), paths)?;
@@ -794,6 +936,76 @@ fn add(
         write_atomic(&paths.manifest(), doc.to_string().as_bytes())?;
     }
     Ok(())
+}
+
+/// How `add` records one skill.
+enum Entry {
+    /// A `[skills]` entry naming its own source or path.
+    Own(Item),
+    /// A skill from a declared source, like `cargo add` inheriting a workspace
+    /// dependency. `item` is the `source` reference plus anything it overrides.
+    Member {
+        alias: String,
+        item: Item,
+        options: SkillOptions,
+        /// Whether discovery lists the skill under this name rather than another.
+        discovered: bool,
+        /// The declaration's settings the skill takes on, such as `profiles = ["work"]`.
+        inherits: Vec<String>,
+    },
+}
+
+/// The source declaration a Git skill joins and whether it needs its own `ref`.
+/// Without `--ref`, the skill inherits the declaration's ref.
+fn join_group<'a>(
+    declarations: &'a [repositories::Declaration],
+    git: &Git,
+    url: &str,
+    source: &str,
+    git_ref: Option<&str>,
+) -> Result<Option<(&'a repositories::Declaration, bool)>> {
+    let matching: Vec<_> = declarations
+        .iter()
+        .filter(|d| {
+            d.source
+                .as_deref()
+                .is_some_and(|declared| repositories::same_repository(declared, source))
+        })
+        .collect();
+    let Some(&first) = matching.first() else {
+        return Ok(None);
+    };
+    let follows_default = matching.iter().copied().find(|d| d.git_ref.is_none());
+    let Some(wanted) = git_ref else {
+        return Ok(Some((follows_default.unwrap_or(first), false)));
+    };
+    if let Some(&same) = matching
+        .iter()
+        .find(|d| d.git_ref.as_deref() == Some(wanted))
+    {
+        return Ok(Some((same, false)));
+    }
+    // A tree URL names the default branch that a declaration without a ref follows.
+    if let Some(declaration) = follows_default
+        && git.default_branch(url)?.as_deref() == Some(wanted)
+    {
+        return Ok(Some((declaration, false)));
+    }
+    Ok(Some((first, true)))
+}
+
+/// Inserts an entry the way `cargo add` does: in key order when the table is
+/// already sorted, otherwise last.
+fn insert_entry(table: &mut Table, name: &str, item: Item) {
+    let sorted = table
+        .iter()
+        .filter(|(_, item)| item.is_value())
+        .map(|(key, _)| key)
+        .is_sorted();
+    table.insert(name, item);
+    if sorted {
+        table.sort_values();
+    }
 }
 
 fn configure_skills(
@@ -804,14 +1016,37 @@ fn configure_skills(
 ) -> Result<()> {
     options.validate(paths)?;
     let mut doc = read_manifest_doc(paths)?;
-    let table = skills_table(&mut doc)?;
+    let declarations = repositories::declarations(&doc);
+    let coverage = Lock::load(&paths.lock())?.repositories;
     for name in names {
-        let item = table
-            .get_mut(name)
-            .with_context(|| format!("`{name}` isn't in the manifest"))?;
-        options
-            .apply(item, resets)
-            .with_context(|| format!("configuring skill `{name}`"))?;
+        let table = skills_table(&mut doc)?;
+        if let Some(item) = table.get_mut(name) {
+            options
+                .apply(item, resets)
+                .with_context(|| format!("configuring skill `{name}`"))?;
+        } else {
+            // A source's member gets its own entry, as a workspace dependency
+            // gains `{ workspace = true, ... }`.
+            let declaration = declarations
+                .iter()
+                .find(|d| d.selects(name, &coverage))
+                .with_context(|| {
+                    format!(
+                        "`{name}` isn't in the manifest; wildcard members require a previous `skl sync`"
+                    )
+                })?;
+            let mut entry = InlineTable::new();
+            entry.insert("source", declaration.alias.as_str().into());
+            let mut item = value(entry);
+            options
+                .apply(&mut item, resets)
+                .with_context(|| format!("configuring skill `{name}`"))?;
+            if item.as_inline_table().is_none_or(|t| t.len() == 1) {
+                continue;
+            }
+            insert_entry(table, name, item);
+        }
+        repositories::settle(&mut doc, name, &coverage);
     }
     let text = doc.to_string();
     manifest::parse(&text, paths)?;
@@ -829,7 +1064,7 @@ fn list(paths: &Paths, active: &Active) -> Result<bool> {
     let mut manifest = manifest::load(paths)?;
     let lock = Lock::load(&paths.lock())?;
     repositories::append(paths, &mut manifest, &lock.repositories)?;
-    xcode::append_skills(paths, &mut manifest, &lock.xcode)?;
+    export::append(paths, &mut manifest, &lock.commands, &Default::default())?;
     let width = manifest
         .skills
         .iter()
@@ -846,26 +1081,19 @@ fn list(paths: &Paths, active: &Active) -> Result<bool> {
     }
     let mut healthy = true;
     for alias in repositories::pending(paths, &manifest, &lock.repositories, active)? {
-        println!("Repository {alias}: wildcard coverage is missing or stale; run `skl sync`");
+        println!("Source {alias}: wildcard coverage is missing or stale; run `skl sync`");
         healthy = false;
     }
-    if let Some(config) = &manifest.xcode
-        && config.skills.is_none()
-        && !lock.xcode_all_complete
-        && config.enabled(active)
-    {
-        println!("Xcode: all skills selected; run `skl sync` to discover and export them");
-        healthy = false;
-    }
-    if let Some(config) = &manifest.xcode
-        && config.skills.is_none()
-        && lock.xcode.is_empty()
-        && !manifest::matches_os(&config.os)
-    {
-        println!(
-            "Xcode: all skills selected (only on {})",
-            config.os.join(", ")
-        );
+    for (alias, app) in &manifest.apps {
+        if app.skills.is_none()
+            && app.coverage(alias, &lock.repositories).is_none()
+            && !manifest::matches_os(&app.defaults.os)
+        {
+            println!(
+                "Source {alias}: all skills selected (only on {})",
+                app.defaults.os.join(", ")
+            );
+        }
     }
     for skill in &manifest.skills {
         let (origin, version) = match &skill.origin {
@@ -891,12 +1119,15 @@ fn list(paths: &Paths, active: &Active) -> Result<bool> {
                     );
                 (o.source.clone(), version)
             }
-            Origin::Local(dir) | Origin::OptionalLocal(dir) => match lock.xcode.get(&skill.name) {
-                Some(entry) if *dir == xcode::skill_dir(paths, &skill.name, entry) => {
-                    ("Xcode".into(), entry.version.replace('\n', " / "))
+            Origin::Local(dir) | Origin::OptionalLocal(dir) => {
+                match export::member(&lock, &skill.name) {
+                    Some(entry) if *dir == export::stored(paths, &skill.name, entry) => (
+                        format!("app: {}", entry.repository.as_deref().unwrap_or_default()),
+                        entry.snapshot.version.replace('\n', " / "),
+                    ),
+                    _ => (paths.tilde(dir), "local".to_string()),
                 }
-                _ => (paths.tilde(dir), "local".to_string()),
-            },
+            }
         };
         let status = if !manifest::matches_os(&skill.os) {
             format!("  (only on {})", skill.os.join(", "))

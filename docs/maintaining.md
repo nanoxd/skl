@@ -39,7 +39,10 @@ step without overwriting branch changes. Resolve any conflict and rerun the
 workflow; reruns update the existing release and skip already saved entries.
 Pull the automated commit before preparing the next release.
 
-This automates changelog headings, not the package version in `Cargo.toml`.
+This automates changelog headings, not the package version in `Cargo.toml`. Set
+that version to match the tag before tagging. The release fails before
+publishing anything when they differ, since the binaries and the Homebrew formula
+test report the package version.
 
 ## Maintaining the Homebrew formula
 

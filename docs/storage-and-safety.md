@@ -48,8 +48,7 @@ SSH keys and credential helpers you already have.
 
 ~/.local/share/skl/
   store/<repo>/<commit>/<dir>   each skill's files at its locked commit
-  store/xcode/<digest>/<name>  selected Xcode skill snapshots
-  store/commands/<digest>/<name>  app command snapshots
+  store/commands/<digest>/<name>  app snapshots, including Xcode
   repos/                        git caches, so updates only fetch what changed
   state.toml                    the links skl created
   profile                       this machine's profiles
@@ -105,7 +104,9 @@ processes are outside this protection.
 
 Imported trees must have a regular-file, nonempty UTF-8 `SKILL.md`. Symlinks,
 special files, and special permission bits are rejected. Snapshots are normalized,
-hashed, staged, and atomically published using the Xcode snapshot machinery.
+hashed, staged, and atomically published the same way for every app, including
+Xcode. Content cached under `store/xcode` by version 2 locks is reused until the
+next export moves it.
 Failures retain the last working lock and links. Missing executables instead
 remove only owned links and retain their lock and cached snapshot.
 

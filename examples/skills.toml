@@ -25,8 +25,13 @@ skill-creator = { source = "anthropics/skills", subdir = "skills/skill-creator" 
 # For an exporter, pass "{output}" as a whole argument naming its destination.
 # app = { command = ["my-app", "export-skill", "{output}"], timeout = 60 }
 
-# Declare a repository once and select several skills.
-# [repositories.team]
+# Skills bundled with Xcode on macOS. Machines without Xcode skip them.
+# [sources.xcode]
+# app = "xcode"
+# skills = "*"
+
+# Declare a source once and select several skills from it.
+# [sources.team]
 # source = "your-org/agent-skills"
 # ref = "main"
 # skills = ["review", "testing"]

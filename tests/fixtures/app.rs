@@ -11,6 +11,19 @@ fn main() {
         std::thread::sleep(Duration::from_secs(10));
         return;
     }
+    if args.get(2).is_some_and(|s| s == "--collection") {
+        // Exports every skill under `collection`, like an app with several skills.
+        fn copy(source: &Path, dest: &Path) {
+            fs::create_dir_all(dest).unwrap();
+            for entry in fs::read_dir(source).unwrap() {
+                let path = entry.unwrap().path();
+                let target = dest.join(path.file_name().unwrap());
+                if path.is_dir() { copy(&path, &target); } else { fs::copy(&path, &target).unwrap(); }
+            }
+        }
+        copy(&root.join("collection"), Path::new(&args[3]));
+        return;
+    }
     if args.get(2).is_some_and(|s| s == "--version") {
         if mode == "version-fail" { std::process::exit(3); }
         print!("app 1.2.3");

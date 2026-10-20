@@ -56,12 +56,24 @@ pub fn prepare(changelog: &str, tag: &str, date: &str) -> Result<(String, String
     Ok((updated, format!("{notes}\n")))
 }
 
+/// The binaries report the package version, so a tag that names another version
+/// would publish binaries and a Homebrew formula that disagree.
+pub fn check_version(tag: &str, package: &str) -> Result<()> {
+    if tag.strip_prefix('v') != Some(package) {
+        bail!(
+            "release tag {tag} doesn't match version {package} in Cargo.toml. Bump the version before tagging."
+        );
+    }
+    Ok(())
+}
+
 #[allow(dead_code)] // Also included by the CLI integration tests.
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().collect();
     if args.len() != 3 {
         bail!("usage: prepare_release <tag> <YYYY-MM-DD>");
     }
+    check_version(&args[1], env!("CARGO_PKG_VERSION"))?;
     let original = std::fs::read_to_string("CHANGELOG.md").context("reading CHANGELOG.md")?;
     let (updated, notes) = prepare(&original, &args[1], &args[2])?;
     // These are disposable workflow checkout files; never write user config.

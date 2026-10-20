@@ -11,10 +11,11 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::git::{self, Git};
-use crate::lock::{Lock, LockedSkill};
+use crate::lock::{CommandSkill, Lock, LockedSkill};
 use crate::manifest::{self, GitOrigin, Origin, Skill};
 use crate::paths::Paths;
 use crate::profile::Active;
+use crate::repositories::Coverage;
 
 #[derive(Default)]
 pub struct Options {
@@ -36,10 +37,13 @@ pub struct Options {
 pub fn run(paths: &Paths, active: &Active, opts: &Options) -> Result<bool> {
     if opts.plan.is_some() || opts.apply_plan.is_some() {
         let manifest = manifest::load(paths)?;
+        // Arbitrary commands cannot promise a side-effect-free preview. Built-in
+        // apps such as Xcode run only their known export.
         if manifest
             .skills
             .iter()
             .any(|s| matches!(s.origin, Origin::Command(_)))
+            || manifest.apps.values().any(|app| app.preset.is_none())
         {
             bail!("saved update plans do not support command imports; use sync or update");
         }
@@ -78,8 +82,8 @@ pub fn run(paths: &Paths, active: &Active, opts: &Options) -> Result<bool> {
     if let Some(saved) = &saved
         && !options.dry_run
     {
-        for (name, snapshot) in &saved.xcode_snapshots {
-            snapshot.install(paths, name, &saved.target.xcode[name])?;
+        for (name, snapshot) in &saved.app_snapshots {
+            snapshot.install(paths, name, &saved.target.commands[name])?;
         }
     }
     let (ok, lock) = run_inner(
@@ -87,7 +91,7 @@ pub fn run(paths: &Paths, active: &Active, opts: &Options) -> Result<bool> {
         active,
         &options,
         &git,
-        saved.as_ref().map(|p| (&p.target, &p.xcode_snapshots)),
+        saved.as_ref().map(|p| (&p.target, &p.app_snapshots)),
         opts.plan.is_some(),
         &mut snapshots,
     )?;
@@ -114,9 +118,9 @@ fn run_inner(
     active: &Active,
     opts: &Options,
     git: &Git,
-    planned: Option<(&Lock, &BTreeMap<String, crate::xcode::Snapshot>)>,
+    planned: Option<(&Lock, &BTreeMap<String, crate::export::Snapshot>)>,
     planning: bool,
-    snapshots: &mut BTreeMap<String, crate::xcode::Snapshot>,
+    snapshots: &mut BTreeMap<String, crate::export::Snapshot>,
 ) -> Result<(bool, Lock)> {
     let embedded = planned.map(|(_, snapshots)| snapshots);
     let planned = planned.map(|(lock, _)| lock);
@@ -129,14 +133,11 @@ fn run_inner(
     let mut repository_entries = BTreeMap::new();
     let mut repository_commits = BTreeMap::new();
     if opts.locked
-        && old_lock
-            .repositories
-            .keys()
-            .any(|alias| !manifest.repositories.contains_key(alias))
+        && old_lock.repositories.keys().any(|alias| {
+            !manifest.repositories.contains_key(alias) && !manifest.apps.contains_key(alias)
+        })
     {
-        bail!(
-            "skills.lock contains removed wildcard repositories; run `skl sync` without --locked"
-        );
+        bail!("skills.lock contains removed wildcard sources; run `skl sync` without --locked");
     }
     for (alias, group) in &manifest.repositories {
         let options = group.skill(alias, &manifest.agents, paths)?;
@@ -155,19 +156,19 @@ fn run_inner(
         } else if opts.locked {
             let old = old_lock.repositories.get(alias).with_context(|| {
                 format!(
-                    "repository `{alias}` has no wildcard coverage; run `skl sync` without --locked"
+                    "source `{alias}` has no wildcard coverage; run `skl sync` without --locked"
                 )
             })?;
             if !crate::repositories::matches(group, old, &manifest.agents, paths)? {
                 bail!(
-                    "repository `{alias}` wildcard coverage is out of date; run `skl sync` without --locked"
+                    "source `{alias}` wildcard coverage is out of date; run `skl sync` without --locked"
                 );
             }
             repository_entries.insert(alias.clone(), old.clone());
         } else {
             let (coverage, commit) =
                 crate::repositories::discover(git, group, &manifest.agents, paths).with_context(
-                    || format!("discovering repository `{alias}`; previous install preserved"),
+                    || format!("discovering source `{alias}`; previous install preserved"),
                 )?;
             repository_commits.insert(
                 (
@@ -181,129 +182,203 @@ fn run_inner(
     }
     crate::repositories::append(paths, &mut manifest, &repository_entries)?;
 
-    let mut xcode_entries = BTreeMap::new();
-    let mut xcode_all_complete = false;
-    if let Some(config) = &manifest.xcode {
-        xcode_entries = old_lock
-            .xcode
+    // App sources export before anything changes. A failed export keeps each
+    // member's previous snapshot, and a missing app skips its members.
+    let mut app_entries = BTreeMap::new();
+    let mut unavailable_apps = BTreeSet::new();
+    if opts.locked
+        && old_lock.commands.values().any(|entry| {
+            entry
+                .repository
+                .as_ref()
+                .is_some_and(|alias| !manifest.apps.contains_key(alias))
+        })
+    {
+        bail!(
+            "skills.lock contains skills from removed app sources; run `skl sync` without --locked"
+        );
+    }
+    let explicit: BTreeSet<String> = manifest.skills.iter().map(|s| s.name.clone()).collect();
+    for (alias, app) in &manifest.apps {
+        let members: BTreeMap<String, CommandSkill> = old_lock
+            .commands
             .iter()
-            .filter(|(n, _)| config.selects(n))
-            .map(|(n, e)| (n.clone(), e.clone()))
+            .filter(|(_, entry)| entry.repository.as_deref() == Some(alias.as_str()))
+            .map(|(name, entry)| (name.clone(), entry.clone()))
             .collect();
-        xcode_all_complete = config.skills.is_none() && old_lock.xcode_all_complete;
-        let unrelated_update = opts.update.as_ref().is_some_and(|names| {
-            !names.is_empty()
-                && names
-                    .iter()
-                    .all(|name| manifest.skills.iter().any(|s| &s.name == name))
-        });
-        if let Some(plan) = planned {
-            xcode_entries = plan.xcode.clone();
-            xcode_all_complete = plan.xcode_all_complete;
-            for (name, entry) in &xcode_entries {
-                if old_lock.xcode.get(name) != Some(entry) {
-                    out.event(
-                        if old_lock.xcode.contains_key(name) {
-                            '↑'
-                        } else {
-                            '+'
-                        },
-                        name,
-                        format!("Xcode {}", entry.version.replace('\n', " / ")),
-                    );
-                }
-            }
-            for name in old_lock
-                .xcode
-                .keys()
-                .filter(|name| !xcode_entries.contains_key(*name))
+        let selected: BTreeMap<String, CommandSkill> = members
+            .iter()
+            .filter(|(name, _)| app.selects(name))
+            .map(|(name, entry)| (name.clone(), entry.clone()))
+            .collect();
+        let old_coverage = old_lock
+            .repositories
+            .get(alias)
+            .filter(|c| c.producer.is_some())
+            .cloned();
+        let keep_coverage = |entries: &mut BTreeMap<String, Coverage>| {
+            if app.skills.is_none()
+                && let Some(coverage) = &old_coverage
             {
-                out.event('-', name, "Xcode".into());
+                entries.insert(alias.clone(), coverage.clone());
             }
-        } else if !config.enabled(active) {
-            xcode_entries = old_lock.xcode.clone();
-            xcode_all_complete = old_lock.xcode_all_complete;
-        } else if config.skills.as_ref().is_some_and(|s| s.is_empty()) {
-            if opts.locked && !old_lock.xcode.is_empty() {
-                bail!("skills.lock still contains Xcode skills; run `skl sync` without --locked");
+        };
+        let requested = opts.update.as_ref().is_none_or(|names| {
+            names.is_empty()
+                || names
+                    .iter()
+                    .any(|name| !explicit.contains(name) && app.selects(name))
+        });
+        let event = |out: &mut Report, name: &str, entry: &CommandSkill| {
+            if members.get(name) != Some(entry) {
+                let version = entry.snapshot.version.replace('\n', " / ");
+                out.event(
+                    if members.contains_key(name) {
+                        '↑'
+                    } else {
+                        '+'
+                    },
+                    name,
+                    format!("{alias} {version}").trim_end().to_owned(),
+                );
             }
-        } else if !unrelated_update {
-            if opts.locked {
-                if xcode_entries != old_lock.xcode
-                    || config
-                        .skills
-                        .as_ref()
-                        .is_some_and(|names| names.iter().any(|n| !xcode_entries.contains_key(n)))
-                    || config.skills.is_none() && !xcode_all_complete
-                    || xcode_entries.iter().any(|(n, e)| {
-                        !crate::xcode::skill_dir(paths, n, e)
-                            .join("SKILL.md")
-                            .is_file()
-                    })
-                {
-                    bail!(
-                        "Xcode exports are not cached for this selection; run `skl sync` without --locked"
-                    );
+        };
+        if let Some(plan) = planned {
+            for (name, entry) in &plan.commands {
+                if entry.repository.as_deref() == Some(alias.as_str()) {
+                    event(&mut out, name, entry);
+                    app_entries.insert(name.clone(), entry.clone());
                 }
-            } else if opts.dry_run && !planning {
-                out.note("would run `xcrun agent skills export <staging-directory>` and select Xcode skills".into());
-            } else {
-                match crate::xcode::Export::run().and_then(|export| {
-                    let staging = planning.then(tempfile::tempdir).transpose()?;
-                    let mut install_paths = paths.clone();
-                    if let Some(stage) = &staging {
-                        install_paths.data = stage.path().to_owned();
+            }
+            for name in members.keys().filter(|n| !app_entries.contains_key(*n)) {
+                out.event('-', name, alias.clone());
+            }
+            if let Some(coverage) = plan.repositories.get(alias) {
+                repository_entries.insert(alias.clone(), coverage.clone());
+            }
+        } else if !app.enabled(active) {
+            app_entries.extend(members.clone());
+            if let Some(coverage) = &old_coverage {
+                repository_entries.insert(alias.clone(), coverage.clone());
+            }
+        } else if app.is_empty() {
+            if opts.locked && !members.is_empty() {
+                bail!(
+                    "skills.lock still contains source `{alias}` skills; run `skl sync` without --locked"
+                );
+            }
+        } else if !requested {
+            app_entries.extend(selected);
+            keep_coverage(&mut repository_entries);
+        } else if opts.locked {
+            let coverage = app.coverage(alias, &old_lock.repositories);
+            let cached = app.skills.is_some() || coverage.is_some();
+            let mut names = app.names(alias, &old_lock.commands);
+            names.extend(
+                coverage
+                    .into_iter()
+                    .flat_map(|c| c.members.keys())
+                    .filter(|n| app.selects(n))
+                    .cloned(),
+            );
+            if !cached
+                || selected != members
+                || names.iter().any(|name| {
+                    !selected.get(name).is_some_and(|entry| {
+                        entry.producer == app.producer
+                            && crate::export::stored(paths, name, entry)
+                                .join("SKILL.md")
+                                .is_file()
+                    })
+                })
+            {
+                bail!(
+                    "source `{alias}` exports are not cached for this selection; run `skl sync` without --locked"
+                );
+            }
+            app_entries.extend(selected);
+            keep_coverage(&mut repository_entries);
+        } else if opts.dry_run && !planning {
+            out.note(format!(
+                "{alias}: would run `{}` and select its skills",
+                app.producer.command.join(" ")
+            ));
+            app_entries.extend(selected);
+            keep_coverage(&mut repository_entries);
+        } else if !opts.run_commands && !planning {
+            // Like command imports, exports wait for an explicit sync or update.
+            out.note(format!(
+                "{alias}: app export requires an explicit sync or update"
+            ));
+            app_entries.extend(selected);
+            keep_coverage(&mut repository_entries);
+        } else {
+            let result = crate::export::Export::run(app).and_then(|export| {
+                let Some(export) = export else {
+                    return Ok(None);
+                };
+                let staging = planning.then(tempfile::tempdir).transpose()?;
+                let mut install_paths = paths.clone();
+                if let Some(stage) = &staging {
+                    install_paths.data = stage.path().to_owned();
+                }
+                let (entries, errors) = export.install(
+                    &install_paths,
+                    alias,
+                    app,
+                    &members,
+                    &manifest.skills,
+                    opts.update.as_ref(),
+                )?;
+                if planning {
+                    for (name, entry) in &entries {
+                        let staged = crate::app::skill_dir(&install_paths, name, entry);
+                        let source = if staged.exists() {
+                            staged
+                        } else {
+                            crate::export::stored(paths, name, entry)
+                        };
+                        snapshots.insert(name.clone(), crate::export::Snapshot::capture(&source)?);
                     }
-                    let (entries, errors) = export.install(
-                        &install_paths,
-                        config,
-                        &old_lock.xcode,
-                        &manifest.skills,
-                        opts.update.as_ref(),
-                    )?;
-                    if planning {
-                        for (name, entry) in &entries {
-                            let staged = crate::xcode::skill_dir(&install_paths, name, entry);
-                            let source = if staged.exists() {
-                                staged
-                            } else {
-                                crate::xcode::skill_dir(paths, name, entry)
-                            };
-                            snapshots
-                                .insert(name.clone(), crate::xcode::Snapshot::capture(&source)?);
-                        }
+                }
+                let coverage = app
+                    .skills
+                    .is_none()
+                    .then(|| export.coverage(app))
+                    .transpose()?;
+                Ok(Some((entries, errors, coverage)))
+            });
+            match result {
+                Ok(Some((entries, errors, coverage))) => {
+                    for (name, entry) in &entries {
+                        event(&mut out, name, entry);
                     }
-                    let complete = config.skills.is_none() && export.covers_all(&entries);
-                    Ok((entries, errors, complete))
-                }) {
-                    Ok((entries, errors, complete)) => {
-                        xcode_all_complete = complete;
-                        for (name, entry) in &entries {
-                            if old_lock.xcode.get(name) != Some(entry) {
-                                out.event(
-                                    if old_lock.xcode.contains_key(name) {
-                                        '↑'
-                                    } else {
-                                        '+'
-                                    },
-                                    name,
-                                    format!("Xcode {}", entry.version.replace('\n', " / ")),
-                                );
-                            }
-                        }
-                        xcode_entries = entries;
-                        for error in errors {
-                            out.error("Xcode", &error);
-                        }
+                    app_entries.extend(entries);
+                    if let Some(coverage) = coverage {
+                        repository_entries.insert(alias.clone(), coverage);
                     }
-                    Err(err) => out.error("Xcode", &format!("{err:#}")),
+                    for error in errors {
+                        out.error(alias, &error);
+                    }
+                }
+                Ok(None) => {
+                    // Like a missing command, keep the cache for other machines.
+                    out.note(format!("{alias}: app unavailable; skipping"));
+                    unavailable_apps.insert(alias.clone());
+                    app_entries.extend(members.clone());
+                    if let Some(coverage) = &old_coverage {
+                        repository_entries.insert(alias.clone(), coverage.clone());
+                    }
+                }
+                Err(err) => {
+                    out.error(alias, &format!("{err:#}"));
+                    app_entries.extend(selected);
+                    keep_coverage(&mut repository_entries);
                 }
             }
         }
-    } else if opts.locked && !old_lock.xcode.is_empty() {
-        bail!("skills.lock still contains Xcode skills; run `skl sync` without --locked");
     }
-    crate::xcode::append_skills(paths, &mut manifest, &xcode_entries)?;
+    crate::export::append(paths, &mut manifest, &app_entries, &unavailable_apps)?;
 
     // Excluded skills retain their lock entries across machines with different OSes
     // or profiles. Their owned links are removed by reconciliation below.
@@ -423,10 +498,8 @@ fn run_inner(
     // network never drops it.
     let mut lock = Lock {
         version: old_lock.version,
-        commands: BTreeMap::new(),
+        commands: app_entries,
         repositories: repository_entries,
-        xcode_all_complete,
-        xcode: xcode_entries,
         skills: manifest
             .skills
             .iter()
@@ -558,7 +631,7 @@ fn run_inner(
                 .filter(|e| e.producer == *origin)
                 .with_context(|| format!("{name}: command snapshot is not locked; run skl sync"))?;
             let dir = crate::app::skill_dir(paths, name, entry);
-            crate::xcode::Snapshot::capture(&dir)?
+            crate::export::Snapshot::capture(&dir)?
                 .verify(&entry.snapshot)
                 .with_context(|| format!("{name}: command snapshot is not cached or valid"))?;
         } else if opts.dry_run || !opts.run_commands {
@@ -616,7 +689,11 @@ fn run_inner(
         }
     }
     // Version 1 remains byte-for-byte stable for locked legacy installs.
-    if !opts.locked && (!lock.commands.is_empty() || old_lock.version >= crate::lock::VERSION) {
+    if !opts.locked
+        && (!lock.commands.is_empty()
+            || lock.repositories.values().any(|c| c.producer.is_some())
+            || old_lock.version >= crate::lock::VERSION)
+    {
         lock.version = crate::lock::VERSION;
     }
 
@@ -669,13 +746,11 @@ fn run_inner(
                 let embedded_content = embedded
                     .is_some_and(|snapshots| snapshots.contains_key(&skill.name))
                     || planning && snapshots.contains_key(&skill.name);
-                if opts.dry_run
+                // Without an export, a new app member has nothing to link yet.
+                if (opts.dry_run || !opts.run_commands)
                     && !embedded_content
-                    && manifest
-                        .xcode
-                        .as_ref()
-                        .is_some_and(|c| c.selects(&skill.name))
-                    && dir.starts_with(paths.store().join("xcode"))
+                    && manifest.apps.values().any(|app| app.selects(&skill.name))
+                    && dir.starts_with(paths.store().join("commands"))
                     && !dir.join("SKILL.md").is_file()
                 {
                     continue;
@@ -777,35 +852,27 @@ fn locate(
         }
         dir.clone()
     } else {
-        let by_name: Vec<_> = candidates.iter().filter(|c| c.name == name).collect();
-        let by_dir: Vec<_> = candidates.iter().filter(|c| c.dir_name == name).collect();
-        // Frontmatter names win over directory names, and a repo with a single skill
-        // can be installed under any name.
-        let matches = if !by_name.is_empty() {
-            by_name
-        } else if !by_dir.is_empty() {
-            by_dir
-        } else if candidates.len() == 1 {
-            candidates.iter().collect()
-        } else if candidates.is_empty() {
-            return Err(format!("{} has no SKILL.md", origin.source));
-        } else {
-            let names: Vec<_> = candidates.iter().map(|c| c.name.as_str()).collect();
-            return Err(format!(
-                "{} has no skill named `{name}`; it has {}",
-                origin.source,
-                names.join(", ")
-            ));
-        };
-        if let [one] = matches.as_slice() {
-            one.subdir.clone()
-        } else {
-            let dirs: Vec<_> = matches.iter().map(|c| c.subdir.as_str()).collect();
-            return Err(format!(
-                "several skills in {} match `{name}` ({}): set `subdir`",
-                origin.source,
-                dirs.join(", ")
-            ));
+        match crate::git::matching(candidates, name).as_slice() {
+            [one] => one.subdir.clone(),
+            [] if candidates.is_empty() => {
+                return Err(format!("{} has no SKILL.md", origin.source));
+            }
+            [] => {
+                let names: Vec<_> = candidates.iter().map(|c| c.name.as_str()).collect();
+                return Err(format!(
+                    "{} has no skill named `{name}`; it has {}",
+                    origin.source,
+                    names.join(", ")
+                ));
+            }
+            matches => {
+                let dirs: Vec<_> = matches.iter().map(|c| c.subdir.as_str()).collect();
+                return Err(format!(
+                    "several skills in {} match `{name}` ({}): set `subdir`",
+                    origin.source,
+                    dirs.join(", ")
+                ));
+            }
         }
     };
     Ok(LockedSkill {
@@ -1036,11 +1103,12 @@ fn collect_garbage(paths: &Paths, lock: &Lock, state: &State) -> Result<()> {
             Some((git::cache_key(&url), l.commit.clone()))
         })
         .collect();
-    for entry in lock.commands.values() {
+    for (name, entry) in &lock.commands {
         live.insert(("commands".into(), entry.snapshot.digest.clone()));
-    }
-    for entry in lock.xcode.values() {
-        live.insert(("xcode".into(), entry.digest.clone()));
+        // Content cached by a version 2 lock stays where it is until re-exported.
+        if crate::export::stored(paths, name, entry).starts_with(store.join("xcode")) {
+            live.insert(("xcode".into(), entry.snapshot.digest.clone()));
+        }
     }
     for link in &state.links {
         if let Ok(rest) = link.target.strip_prefix(&store) {

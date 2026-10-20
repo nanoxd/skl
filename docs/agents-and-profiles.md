@@ -89,7 +89,7 @@ work-tools = { source = "example/work-tools", os = ["macos"], profiles = ["work"
 ```
 
 Accepted values are `macos` and `linux`. Git and local skills without `os` apply
-on either OS; `[xcode]` defaults to `os = ["macos"]`. When both `os` and `profiles`
+on either OS; the Xcode source defaults to `os = ["macos"]`. When both `os` and `profiles`
 are specified, both must match. `skl list` labels OS-excluded skills with
 `(only on ...)`.
 

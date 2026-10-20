@@ -52,6 +52,15 @@ change your selection. `skl add`, `skl configure`, and `skl remove` are shortcut
 that edit the same file and sync for you. See the annotated
 [example manifest](examples/skills.toml) for more options.
 
+To take several skills from one repository, declare it once as a source and list
+the skills by name, or use `skills = "*"` for all of them:
+
+```toml
+[sources.anthropics]
+source = "anthropics/skills"
+skills = ["frontend-design", "skill-creator"]
+```
+
 Keep `~/.config/skl/skills.toml` and the generated `skills.lock` in your dotfiles.
 On another machine, restore those files and run `skl sync --locked` to install
 the pinned Git versions without changing the lockfile.
@@ -72,7 +81,7 @@ Generate shell completions with `skl completions bash`, `skl completions zsh`, o
 
 - [Getting started](docs/getting-started.md) — installation and dotfiles setup
 - [Finding and adding skills](docs/adding-skills.md) — search, repositories, local skills, and adopting installed skills
-- [Configuration](docs/configuration.md) — manifest, repository groups, and lockfile
+- [Configuration](docs/configuration.md) — manifest, declared sources, and lockfile
 - [Agents and profiles](docs/agents-and-profiles.md) — destinations and machine selection
 - [Project skills](docs/projects.md) — share skills with a team
 - [All documentation](docs/index.md) — commands, updates, troubleshooting, Xcode, and CI

@@ -16,9 +16,9 @@ Use `skl info NAME` to inspect one skill and `skl doctor` to check your installa
 `SKILL.md` files, missing or conflicting links, stale ownership records, and
 required tools on PATH. It prints remedies and exits with status 1 when problems
 are found (0 when healthy). It never changes files, takes a run lock, invokes
-external tools, or contacts the network. It checks cached Xcode exports without
-exporting new skills. Matching user-created links remain healthy and unowned. Local `SKILL.md`
-symlinks are accepted; cached Git/Xcode skill files must be regular files. Diagnostics describe a point-in-time view; rerun after
+external tools, or contacts the network. It checks cached app exports, including
+Xcode, without exporting new skills. Matching user-created links remain healthy and unowned. Local `SKILL.md`
+symlinks are accepted; cached Git and app skill files must be regular files. Diagnostics describe a point-in-time view; rerun after
 a concurrent sync finishes.
 
 ## Content verification
@@ -39,11 +39,11 @@ rejected. Git and tar must be available. Verification never initializes a
 repository or fetches, including Git's implicit partial-clone lazy fetching.
 Missing cached commits or repositories produce `unavailable`, never `verified`.
 
-Cached Xcode skills are checked against their lockfile digest without invoking
-Xcode or any external tools. The digest includes contents, paths, types, and
+Cached app skills, including Xcode's, are checked against their lockfile digest
+without running the app or any external tools. The digest includes contents, paths, types, and
 permissions. `verify` makes no repairs, takes no run lock, and changes no
 manifest, lock, state, store, or agent links. Exit status is 1 for drift or
-unavailable active baselines, including undiscovered wildcard groups, and 0
+unavailable active baselines, including undiscovered wildcard sources, and 0
 otherwise. Verification checks stored content; use `doctor` to inspect agent
 links and ownership. These checks are a point-in-time observation; rerun after
 concurrent updates. A verified result establishes agreement with the local lock
@@ -58,7 +58,7 @@ object, including when configuration, profile resolution, or filesystem reads
 fail. Runtime errors do not also print human messages to stderr. Invalid command
 syntax is handled by clap before execution and still uses stderr.
 
-Every document has `schema_version: 1`, `command`, `status`, `data`, and
+Every document has `schema_version: 2`, `command`, `status`, `data`, and
 `diagnostics`. Status is `ok`, `unhealthy`, or `error`; `error` has `data: null`.
 Each diagnostic has a stable `code`, `severity` (currently `error`), nullable
 `skill` and `path`, a human-readable `message`, and a `remedy`. Scripts should
@@ -67,10 +67,12 @@ targets resolved relative to their link's parent; paths are not canonicalized.
 Paths that cannot be represented as UTF-8 produce a structured runtime error.
 
 - `info` data describes one skill: `name`, `manifest`, `origin` (`git`, `local`,
-  `Xcode`, or `unmanaged`), optional `source`, `git_ref`, `subdir`, `locked`, and
-  `xcode` provenance, `lock_matches`, `content_path`, `content_available`,
-  `profiles`, `active_profiles`, `profile_source`, `os`, `enabled`, `exclusions`,
-  `agents`, and `links`. Each link has `path`, optional `target` and
+  `command`, `app`, or `unmanaged`), optional `source`, `git_ref`, `subdir`,
+  `locked`, and `command` provenance, `lock_matches`, `content_path`,
+  `content_available`, `profiles`, `active_profiles`, `profile_source`, `os`,
+  `enabled`, `exclusions`, `agents`, and `links`. For an app member, `source` is
+  the alias of its declared source, and `command` has `producer`, `source`, and
+  `snapshot`. Each link has `path`, optional `target` and
   `recorded_target`, `owned`, and `status`: `missing`, `unmanaged`, `broken`,
   `different_target`, `installed`, or `local_source`.
 - `list` data has `skills` (the same reports, sorted by name), `unmanaged`
@@ -79,22 +81,22 @@ Paths that cannot be represented as UTF-8 produce a structured runtime error.
   appear as conflicting links in a configured skill report. Hidden entries are
   omitted, as in human output.
 - `doctor` data has `active_profiles` and `profile_source`. Its diagnostics use
-  `stale-lock`, `missing-tool`, `xcode-not-locked`, `not-locked`, `invalid-cache`,
+  `stale-lock`, `missing-tool`, `source-not-locked`, `not-locked`, `invalid-cache`,
   `missing-local-skill`, `stale-state`, `missing-link`, `unreadable-link`,
   `outdated-link`, `broken-link`, or `link-conflict`.
 
 - `verify` data has `active_profiles`, `profile_source`, and `skills`, sorted by
-  name. Each skill has `name`, `source_kind` (`git`, `xcode`, or `local`),
+  name. Each skill has `name`, `source_kind` (`git`, `command`, `app`, or `local`),
   `status` (`verified`, `drift`, `unavailable`, or `skipped`), nullable absolute
   cache `path`, `message`, and `changes`. Changes have a path relative to the
   skill directory and `kind` (`added`, `deleted`, `changed`, or `digest-changed`).
-  Xcode digest changes use path `.`. Diagnostics use `content-drift` and
+  App digest changes use path `.`. Diagnostics use `content-drift` and
   `baseline-unavailable`; either causes `status: "unhealthy"` and exit status 1.
 
 Runtime failures use `runtime-error`. List health diagnostics use `not-linked`
-(or `xcode-not-locked` for undiscovered wildcard imports). Exit codes match human
+(or `source-not-locked` for undiscovered wildcard sources). Exit codes match human
 output: `info` succeeds when inspection completes, even if content or links are
 missing; `doctor` fails when it finds any diagnostic; `list` fails for missing
-active links or undiscovered active Xcode wildcard imports. List retains its
+active links or undiscovered active wildcard sources. List retains its
 existing link-presence criteria; use doctor to check ownership and cache health.
 Excluded skills remain in list data but do not cause missing-link failures.

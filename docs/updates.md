@@ -55,19 +55,21 @@ paths, resolved destinations, exact target commits, and full Git patches. Applyi
 rejects changed context instead of resolving newer branch tips. Selected updates
 still reconcile the entire manifest, as ordinary `update` does: missing or stale
 lock entries are included in the plan, and local skills and links are reconciled.
-Wildcard repository membership is recorded alongside its exact pins. Apply does
+Wildcard source membership is recorded alongside its exact pins. Apply does
 not rediscover membership or accept later additions, removals, or branch changes.
 
-Planning enabled, selected Xcode imports runs the exporter in disposable staging
+Planning with an enabled Xcode source runs its export in disposable staging
 and embeds the normalized files, permissions, version, and content hashes in the
 plan. Apply verifies those hashes and installs the embedded content without
 running `xcrun`; changed or unavailable Xcode exports cannot alter reviewed content.
 Diffs include additions and removals. Previous cached Xcode content must be
 available and intact to review changes or removals; otherwise planning fails.
-Disabled imports and unrelated selected updates do not invoke the exporter.
-Local skill content is not snapshotted.
+Disabled sources and unrelated selected updates do not invoke the exporter.
+Local skill content is not snapshotted. Plans reject command imports and app
+sources with their own `command`, since an arbitrary command cannot promise
+a side-effect-free preview.
 
-Plans now use format version 2. Regenerate older plans; incompatible versions are
+Plans now use format version 3. Regenerate older plans; incompatible versions are
 rejected explicitly. Xcode payloads can make plans substantially larger than Git
 only plans.
 

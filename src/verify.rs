@@ -11,12 +11,13 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::{
+    export,
     git::{self, Git},
     lock::Lock,
     manifest::{self, Origin},
     paths::Paths,
     profile::Active,
-    repositories, sync, xcode,
+    repositories, sync,
 };
 
 #[derive(Serialize)]
@@ -50,7 +51,7 @@ pub fn run(paths: &Paths, active: &Active, names: &[String], json_output: bool) 
     let lock = Lock::load(&paths.lock())?;
     repositories::append(paths, &mut manifest, &lock.repositories)?;
     let explicit: BTreeSet<_> = manifest.skills.iter().map(|s| s.name.clone()).collect();
-    xcode::append_skills(paths, &mut manifest, &lock.xcode)?;
+    export::append(paths, &mut manifest, &lock.commands, &Default::default())?;
     for name in names {
         manifest::validate_name(name)?;
         ensure!(
@@ -66,23 +67,8 @@ pub fn run(paths: &Paths, active: &Active, names: &[String], json_output: bool) 
                 severity: "error",
                 skill: None,
                 path: Some(std::path::absolute(paths.lock())?),
-                message: format!("repository `{alias}` has missing or stale wildcard coverage"),
+                message: format!("source `{alias}` has missing or stale wildcard coverage"),
                 remedy: "Run skl sync to populate the pinned baseline, then verify again.",
-            });
-        }
-        if manifest
-            .xcode
-            .as_ref()
-            .is_some_and(|c| c.enabled(active) && c.skills.is_none())
-            && !lock.xcode_all_complete
-        {
-            diagnostics.push(Diagnostic {
-                code: "baseline-unavailable",
-                severity: "error",
-                skill: None,
-                path: Some(std::path::absolute(paths.lock())?),
-                message: "Xcode wildcard selection has no complete snapshot".into(),
-                remedy: "Run skl sync with Xcode configured, then verify again.",
             });
         }
     }
@@ -96,7 +82,7 @@ pub fn run(paths: &Paths, active: &Active, names: &[String], json_output: bool) 
         let kind = match &skill.origin {
             Origin::Git(_) => "git",
             Origin::Command(_) => "command",
-            Origin::Local(_) if !explicit.contains(&skill.name) => "xcode",
+            Origin::Local(_) if !explicit.contains(&skill.name) => "app",
             Origin::Local(_) | Origin::OptionalLocal(_) => "local",
         };
         let mut observation = Observation {
@@ -120,7 +106,7 @@ pub fn run(paths: &Paths, active: &Active, names: &[String], json_output: bool) 
                         observation.path = Some(std::path::absolute(&target)?);
                         ensure_directory_chain(&paths.store(), &target)?;
                         ensure!(
-                            xcode::content_digest(&target)? == entry.snapshot.digest,
+                            export::content_digest(&target)? == entry.snapshot.digest,
                             "command snapshot digest mismatch"
                         );
                         Ok(Vec::new())
@@ -155,15 +141,13 @@ pub fn run(paths: &Paths, active: &Active, names: &[String], json_output: bool) 
                         ensure_directory_chain(&paths.store(), &target)?;
                         compare(&expected, &tree(&target)?)
                     }
-                    Origin::Local(target) if kind == "xcode" => {
+                    Origin::Local(target) if kind == "app" => {
                         observation.path = Some(std::path::absolute(target)?);
-                        let entry = lock
-                            .xcode
-                            .get(&skill.name)
-                            .context("no locked Xcode digest")?;
+                        let entry = export::member(&lock, &skill.name)
+                            .context("no locked app snapshot digest")?;
                         ensure_directory_chain(&paths.store(), target)?;
-                        let digest = xcode::content_digest(target)?;
-                        Ok(if digest == entry.digest {
+                        let digest = export::content_digest(target)?;
+                        Ok(if digest == entry.snapshot.digest {
                             Vec::new()
                         } else {
                             vec![Change {
