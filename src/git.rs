@@ -22,6 +22,20 @@ pub struct Candidate {
     pub description: Option<String>,
 }
 
+/// The skills a manifest entry without `subdir` resolves to. Frontmatter names win
+/// over directory names, and a repo with a single skill matches any name.
+pub fn matching<'a>(candidates: &'a [Candidate], name: &str) -> Vec<&'a Candidate> {
+    let by_name: Vec<_> = candidates.iter().filter(|c| c.name == name).collect();
+    if !by_name.is_empty() {
+        return by_name;
+    }
+    let by_dir: Vec<_> = candidates.iter().filter(|c| c.dir_name == name).collect();
+    if !by_dir.is_empty() || candidates.len() != 1 {
+        return by_dir;
+    }
+    candidates.iter().collect()
+}
+
 impl Git {
     pub fn new(repos: PathBuf) -> Self {
         Self {
@@ -64,6 +78,17 @@ impl Git {
             }
             None => bail!("{url} has no branch or tag named `{pattern}`"),
         }
+    }
+
+    /// The branch the remote's HEAD points at, if it advertises one.
+    pub fn default_branch(&self, url: &str) -> Result<Option<String>> {
+        let out = run(git().args(["ls-remote", "--symref", url, "HEAD"]))
+            .with_context(|| format!("looking up the default branch of {url}"))?;
+        Ok(out.lines().find_map(|line| {
+            let (target, name) = line.strip_prefix("ref: ")?.split_once('\t')?;
+            let branch = target.strip_prefix("refs/heads/")?;
+            (name == "HEAD").then(|| branch.to_owned())
+        }))
     }
 
     /// A tree URL cannot distinguish slash-containing refs from directories.

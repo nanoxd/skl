@@ -6,11 +6,11 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde_json::{Value, json};
 
-use crate::{doctor, info, lock::Lock, manifest, paths::Paths, profile::Active, sync, xcode};
+use crate::{doctor, export, info, lock::Lock, manifest, paths::Paths, profile::Active, sync};
 
 pub(crate) fn emit(command: &str, status: &str, data: Value, diagnostics: Value) -> Result<()> {
     let text = serde_json::to_string(&json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "command": command,
         "status": status,
         "data": data,
@@ -95,24 +95,14 @@ pub fn list(paths: &Paths, active: &Active) -> Result<bool> {
     let records = sync::owned_links(paths)?;
     crate::repositories::append(paths, &mut manifest, &lock.repositories)?;
     let explicit: BTreeSet<_> = manifest.skills.iter().map(|s| s.name.clone()).collect();
-    xcode::append_skills(paths, &mut manifest, &lock.xcode)?;
+    export::append(paths, &mut manifest, &lock.commands, &Default::default())?;
     let mut diagnostics = vec![];
     for alias in crate::repositories::pending(paths, &manifest, &lock.repositories, active)? {
         diagnostics.push(json!({
-            "code": "repository-not-locked", "severity": "error", "skill": null,
+            "code": "source-not-locked", "severity": "error", "skill": null,
             "path": path_value(&paths.lock())?,
-            "message": format!("repository `{alias}` wildcard coverage is missing or stale"),
-            "remedy": "Run skl sync to discover the repository skills.",
-        }));
-    }
-    if manifest.xcode.as_ref().is_some_and(|config| {
-        config.skills.is_none() && !lock.xcode_all_complete && config.enabled(active)
-    }) {
-        diagnostics.push(json!({
-            "code": "xcode-not-locked", "severity": "error", "skill": null,
-            "path": path_value(&paths.lock())?,
-            "message": "Xcode wildcard selection has no complete cached export",
-            "remedy": "Run skl sync on a machine with Xcode configured.",
+            "message": format!("source `{alias}` wildcard coverage is missing or stale"),
+            "remedy": "Run skl sync to discover the source's skills.",
         }));
     }
     let mut skills = vec![];

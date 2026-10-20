@@ -48,9 +48,47 @@ app-guide = { command = ["my-app", "export-skill", "{output}"], timeout = 60 }
 
 This is a syntax example; use your app's actual export arguments. The command
 must create the supplied directory with `SKILL.md` directly inside it. References
-and scripts in that directory are included. One entry imports one skill; a CLI
-exporting a collection needs an adapter that selects the desired skill.
-Symlinks and special files are rejected.
+and scripts in that directory are included. Symlinks and special files are
+rejected. One entry imports one skill. For a CLI that exports several, declare an
+[app source](#app-sources).
+
+## App sources
+
+A [declared source](configuration.md#declared-sources) can get its skills from an
+app's export command instead of Git. The command writes a directory of skills into
+`{output}`, and the source selects from them exactly as it would from a Git
+repository:
+
+```toml
+[sources.tools]
+command = ["my-app", "export-skills", "{output}"]
+version-command = ["my-app", "--version"]
+skills = "*"
+exclude = ["experimental"]
+os = ["macos"]
+
+[skills]
+# A member can have its own agents, profiles, or OS.
+reviewer = { source = "tools", agents = ["codex"] }
+```
+
+Each skill directory in the export needs a regular `SKILL.md`, and names come from
+its frontmatter, falling back to the directory name. `skills` takes `"*"` or a
+list, `exclude` works with `"*"`, and `timeout` applies to each command as for
+single imports. `remove` and `configure` edit members the same way as Git source
+members, and `add` only joins Git sources. A member can override only `agents`,
+`profiles`, and `os`.
+
+`app = "xcode"` declares a source from a known app instead of a command. skl
+supplies the command, the version probe, a default `os`, and a check that the app
+is installed. See [Xcode skills](xcode.md).
+
+A missing executable prints an unavailable note, removes the members' owned links,
+and keeps their lock entries and snapshots, as for a single import. The lock
+records the command and app version once under `[sources.<alias>]`, with one
+content digest per member, and a `"*"` selection also records the complete export,
+so `sync --locked` can check that every member is cached. See the
+[lockfile](configuration.md#lockfile) for an example.
 
 ## Bundled files
 
@@ -72,9 +110,9 @@ missing-file error behavior. Adjust application and Homebrew paths for the machi
 ## Review and reproducibility
 
 Command snapshots record the argv, timeout, optional version command, version
-output, and SHA-256 digest in lock version 2. Unchanged content and provenance
-leave the lock untouched. Frontmatter field ordering is normalized using the
-Xcode importer. Changed imports show a diffstat, or a full diff with `--patch`.
+output, and SHA-256 digest in the lockfile. Unchanged content and provenance
+leave the lock untouched. Frontmatter field ordering is normalized for every
+app snapshot. Changed imports show a diffstat, or a full diff with `--patch`.
 
 `sync --locked` validates and uses the matching cached snapshot without invoking
 the app or probing its installation. Missing or stale caches require a normal
@@ -82,7 +120,8 @@ sync. A lock cannot download an app snapshot onto another machine.
 
 `--dry-run` never runs commands, even with `--patch`: arbitrary commands cannot
 promise a side-effect-free preview. It describes deferred imports instead.
-Saved update plans currently reject command imports; use normal sync/update.
+Saved update plans reject command imports and app sources with a `command`,
+so use normal sync/update for those. Built-in apps such as Xcode are supported in plans.
 `list`, `info`, `doctor`, and `verify` inspect existing data without running apps.
 
 `skl configure NAME` can edit agents, profiles, and OS filters without changing

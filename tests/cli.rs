@@ -923,7 +923,7 @@ impl Env {
         .unwrap();
         self.skl_with_env(
             args,
-            &[("PATH", &path), ("FAKE_XCODE", self.remotes.as_os_str())],
+            &[("PATH", &path), ("DEVELOPER_DIR", self.remotes.as_os_str())],
         )
     }
 
@@ -1108,7 +1108,7 @@ fn xcode_rejects_invalid_config_and_duplicate_sources() {
     );
     let output = env.xcode(&["sync"]);
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("conflicts with [skills]"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("conflicts with another declaration"));
     assert_eq!(env.store_commits(), 0);
     assert!(!env.codex("alpha").exists());
 }
@@ -1167,13 +1167,17 @@ fn xcode_locked_requires_verified_wildcard_coverage() {
     assert!(env.xcode(&["sync"]).status.success());
     assert!(env.codex("beta").exists());
     let complete = fs::read_to_string(env.config("skills.lock")).unwrap();
-    assert!(complete.contains("xcode_all_complete = true"));
+    let mut uncovered: toml::Table = toml::from_str(&complete).unwrap();
+    let xcode = uncovered["sources"]["xcode"].as_table_mut().unwrap();
+    assert!(xcode["members"].get("beta").is_some());
+    assert!(xcode["snapshots"].get("beta").is_some());
+    xcode.remove("members");
     assert!(env.xcode(&["sync", "--locked"]).status.success());
 
-    // Old lockfiles without coverage metadata must be refreshed once.
+    // Lockfiles without coverage metadata must be refreshed once.
     fs::write(
         env.config("skills.lock"),
-        complete.replace("xcode_all_complete = true\n", ""),
+        toml::to_string(&uncovered).unwrap(),
     )
     .unwrap();
     assert!(!env.xcode(&["sync", "--locked"]).status.success());
@@ -1591,7 +1595,7 @@ fn saved_update_plan_is_read_only_and_rejects_stale_or_edited_context() {
     );
     fs::write(
         e.home.join("review.toml"),
-        original.replacen("version = 2", "version = 900", 1),
+        original.replacen("version = 3", "version = 900", 1),
     )
     .unwrap();
     assert!(
@@ -1766,8 +1770,9 @@ fn info_handles_unmanaged_unknown_and_unexported_xcode() {
     );
     env.write_manifest("[xcode]\nskills = ['apple']\n");
     let out = env.ok(&["info", "apple"]);
-    assert!(out.contains("Origin: Xcode"));
-    assert!(out.contains("Xcode: not exported"));
+    assert!(out.contains("Origin: app"));
+    assert!(out.contains("Source: xcode"));
+    assert!(out.contains("App export: not exported"));
     assert!(!env.home.join(".local").exists());
 }
 
@@ -1808,7 +1813,8 @@ fn info_reports_cached_xcode_provenance_without_export() {
     let digest = "a".repeat(64);
     fs::write(env.config("skills.lock"), format!("version = 1\nxcode_all_complete = true\n[xcode.apple]\nversion = 'Xcode 27 build TEST'\ndigest = '{digest}'\n")).unwrap();
     let out = env.ok(&["info", "apple"]);
-    assert!(out.contains("Xcode version: Xcode 27 build TEST"));
+    // A version 1 lock's Xcode entry reads as a member of the xcode repository.
+    assert!(out.contains("App version: Xcode 27 build TEST"));
     assert!(out.contains(&format!("Content digest: {digest}")));
     assert!(out.contains("missing SKILL.md"));
     assert!(!env.home.join(".local").exists());
@@ -2014,7 +2020,11 @@ fn doctor_checks_cached_xcode_selection_without_exporting() {
     env.write_manifest("[xcode]\nskills = '*'\nos = ['macos', 'linux']\n");
     let out = env.skl(&["doctor"]);
     assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stdout).contains("xcode-not-locked"));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains(
+            "source-not-locked: installation (~/.config/skl/skills.lock): source `xcode`"
+        )
+    );
     env.write_manifest("[xcode]\nskills = '*'\nprofiles = ['inactive']\nos = ['macos', 'linux']\n");
     assert!(env.ok(&["doctor"]).contains("No problems found"));
     env.write_manifest("[skills]\n");
@@ -2088,7 +2098,7 @@ fn json_output(out: &Output) -> serde_json::Value {
         String::from_utf8_lossy(&out.stderr)
     );
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["schema_version"], 2);
     value
 }
 
@@ -2215,15 +2225,17 @@ fn json_reports_cached_and_undiscovered_xcode_without_exporting() {
     assert!(!out.status.success());
     assert_eq!(
         json_output(&out)["diagnostics"][0]["code"],
-        "xcode-not-locked"
+        "source-not-locked"
     );
     let digest = "a".repeat(64);
     fs::write(env.config("skills.lock"), format!("version = 1\nxcode_all_complete = true\n[xcode.apple]\nversion = 'Xcode TEST'\ndigest = '{digest}'\n")).unwrap();
     let out = env.skl(&["info", "apple", "--json"]);
     assert!(out.status.success());
     let value = json_output(&out);
-    assert_eq!(value["data"]["origin"], "Xcode");
-    assert_eq!(value["data"]["xcode"]["digest"], digest);
+    assert_eq!(value["data"]["origin"], "app");
+    assert_eq!(value["data"]["source"], "xcode");
+    assert_eq!(value["data"]["command"]["source"], "xcode");
+    assert_eq!(value["data"]["command"]["snapshot"]["digest"], digest);
     let value = json_output(&env.skl(&["list", "--json"]));
     assert_eq!(value["data"]["skills"][0], json_output(&out)["data"]);
     assert!(!env.home.join(".local").exists());
@@ -2624,7 +2636,7 @@ fn add_local_collection_all_preserves_unique_hidden_skills_and_relative_paths() 
     assert!(
         fs::read_to_string(env.config("skills.lock"))
             .unwrap()
-            .contains("version = 2")
+            .contains("version = 3")
     );
 }
 
@@ -3143,7 +3155,7 @@ fn search_json_is_versioned_and_ignores_invalid_local_configuration() {
     assert!(out.status.success());
     assert!(out.stderr.is_empty());
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["schema_version"], 2);
     assert_eq!(value["command"], "search");
     assert_eq!(value["status"], "ok");
     assert_eq!(
@@ -3589,7 +3601,7 @@ fn repository_wildcard_dry_run_and_uncached_inspection_are_read_only() {
     ));
     let output = e.skl(&["list", "--json"]);
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("repository-not-locked"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("source-not-locked"));
     e.ok(&["sync", "--dry-run"]);
     assert!(!e.config("skills.lock").exists());
     assert!(!e.home.join(".local/share/skl").exists());
@@ -3810,7 +3822,7 @@ fn repository_exclusions_filter_complete_coverage_and_allow_explicit_overrides()
     let lock: toml::Value =
         toml::from_str(&fs::read_to_string(e.config("skills.lock")).unwrap()).unwrap();
     assert_eq!(
-        lock["repositories"]["tools"]["members"]
+        lock["sources"]["tools"]["members"]
             .as_table()
             .unwrap()
             .len(),
@@ -3952,6 +3964,423 @@ fn remove_undiscovered_wildcard_override_handles_inline_tables() {
     );
     assert!(!e.codex("a").exists());
     assert!(e.codex("b").exists());
+}
+
+#[test]
+fn add_joins_a_declared_source_list_like_a_workspace_dependency() {
+    let e = Env::new();
+    let skills: Vec<_> = ["a", "b", "c", "d", "e", "f", "g"]
+        .map(|name| (format!("skills/{name}"), name))
+        .into_iter()
+        .collect();
+    let mut layout: Vec<_> = skills
+        .iter()
+        .map(|(dir, name)| (dir.as_str(), *name))
+        .collect();
+    layout.push((".hidden/f", "f"));
+    let url = e.repo("catalog", &layout);
+    git(&e.remote("catalog"), &["branch", "next"]);
+    fs::write(
+        e.home.join(".gitconfig"),
+        format!(
+            "[url \"{url}\"]\n insteadOf = https://github.com/acme/catalog.git\n insteadOf = https://github.com/acme/catalog\n"
+        ),
+    )
+    .unwrap();
+    e.write_manifest(
+        "# tools\n[sources.tools]\nsource = 'acme/catalog'\nskills = [\n  'b',\n  'd', # keep d\n]\nagents = ['codex']\n\n[skills]\n",
+    );
+    // A tree URL on the default branch joins a group that follows it, and the
+    // name finds its directory, so neither ref nor subdir is repeated.
+    let out = e.ok(&[
+        "add",
+        "https://github.com/acme/catalog/tree/main/skills/a",
+        "--no-sync",
+    ]);
+    assert!(out.contains("Added a to source `tools`, inheriting agents = [\"codex\"]"));
+    e.ok(&["add", "acme/catalog", "-s", "c", "-s", "c", "--no-sync"]);
+    e.ok(&[
+        "add",
+        "acme/catalog",
+        "--subdir",
+        "skills/e",
+        "--agent",
+        "codex",
+        "--no-sync",
+    ]);
+    let text = fs::read_to_string(e.config("skills.toml")).unwrap();
+    assert!(
+        text.contains("skills = [\n  \"a\",\n  'b',\n  \"c\",\n  'd', # keep d\n  \"e\",\n]"),
+        "{text}"
+    );
+    assert!(text.starts_with("# tools\n"));
+    let before = text.clone();
+    assert!(
+        e.ok(&["add", "acme/catalog@a", "--no-sync"])
+            .contains("already in the manifest")
+    );
+    assert_eq!(fs::read_to_string(e.config("skills.toml")).unwrap(), before);
+    // Settings a member doesn't inherit become a `source` override.
+    let out = e.ok(&[
+        "add",
+        "acme/catalog",
+        "--subdir",
+        ".hidden/f",
+        "--agent",
+        "claude-code",
+        "--no-sync",
+    ]);
+    assert!(out.contains("Added f to source `tools`\n"), "{out}");
+    e.ok(&["add", "acme/catalog@g", "--ref", "next", "--no-sync"]);
+    let text = fs::read_to_string(e.config("skills.toml")).unwrap();
+    let doc: toml::Value = toml::from_str(&text).unwrap();
+    let list: Vec<_> = doc["sources"]["tools"]["skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    // Members with their own settings appear only as entries, never also listed.
+    assert_eq!(list, ["a", "b", "c", "d", "e"]);
+    let entries = doc["skills"].as_table().unwrap();
+    assert_eq!(entries.keys().collect::<Vec<_>>(), ["f", "g"]);
+    assert_eq!(entries["f"]["source"].as_str(), Some("tools"));
+    assert_eq!(entries["f"]["subdir"].as_str(), Some(".hidden/f"));
+    assert_eq!(entries["f"]["agents"][0].as_str(), Some("claude-code"));
+    assert_eq!(entries["g"]["ref"].as_str(), Some("next"));
+    assert!(entries["g"].get("subdir").is_none());
+
+    e.ok(&["sync"]);
+    for name in ["a", "b", "c", "d", "e", "g"] {
+        assert!(e.codex(name).is_symlink(), "{name}");
+        assert!(!e.claude(name).exists(), "{name}");
+    }
+    assert!(e.claude("f").is_symlink());
+    assert!(!e.codex("f").exists());
+    let lock = fs::read_to_string(e.config("skills.lock")).unwrap();
+    assert!(lock.contains("subdir = \".hidden/f\""));
+    assert!(lock.contains("ref = \"next\""));
+    e.ok(&["sync", "--locked"]);
+    // A removed name takes its own line and comment with it.
+    e.ok(&["remove", "d", "f"]);
+    let text = fs::read_to_string(e.config("skills.toml")).unwrap();
+    assert!(
+        text.contains("skills = [\n  \"a\",\n  'b',\n  \"c\",\n  \"e\",\n]"),
+        "{text}"
+    );
+    let doc: toml::Value = toml::from_str(&text).unwrap();
+    assert_eq!(
+        doc["skills"].as_table().unwrap().keys().collect::<Vec<_>>(),
+        ["g"]
+    );
+    assert!(!e.codex("d").exists());
+    assert!(!e.claude("f").exists());
+}
+
+#[test]
+fn add_inherits_a_source_ref_unless_given_its_own() {
+    let e = Env::new();
+    let url = e.repo("group", &[("a", "a")]);
+    git(&e.remote("group"), &["tag", "v1"]);
+    write_skill(&e.remote("group").join("b"), "b", "later");
+    commit(&e.remote("group"), "add b");
+    e.write_manifest(&format!(
+        "[sources.tools]\nsource = '{url}'\nref = 'v1'\nskills = ['a']\n"
+    ));
+    let before = fs::read(e.config("skills.toml")).unwrap();
+    assert!(
+        e.fails(&["add", &url, "--skill", "b", "--no-sync"])
+            .contains("no skill named `b`")
+    );
+    assert_eq!(fs::read(e.config("skills.toml")).unwrap(), before);
+    e.ok(&["add", &url, "--skill", "b", "--ref", "main"]);
+    let doc: toml::Value =
+        toml::from_str(&fs::read_to_string(e.config("skills.toml")).unwrap()).unwrap();
+    assert_eq!(
+        doc["sources"]["tools"]["skills"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(doc["skills"]["b"]["source"].as_str(), Some("tools"));
+    assert_eq!(doc["skills"]["b"]["ref"].as_str(), Some("main"));
+    assert!(body(&e.codex("b")).contains("later"));
+    assert!(e.codex("a").is_symlink());
+}
+
+#[test]
+fn add_restores_wildcard_exclusions_and_references_alias_only_sources() {
+    let e = Env::new();
+    let url = e.repo("group", &[("a", "a"), ("b", "b")]);
+    let other = e.repo("other", &[("x", "x")]);
+    e.write_manifest(&format!(
+        "[sources.all]\nsource = '{url}'\nskills = '*'\nexclude = ['a']\n\n[sources.refs]\nsource = '{other}'\n"
+    ));
+    let before = fs::read(e.config("skills.toml")).unwrap();
+    assert!(
+        e.ok(&["add", &url, "--skill", "b", "--no-sync"])
+            .contains("already selected by source `all`")
+    );
+    assert_eq!(fs::read(e.config("skills.toml")).unwrap(), before);
+    e.ok(&["sync"]);
+    assert!(!e.codex("a").exists());
+    assert!(
+        e.ok(&["add", &url, "--skill", "b", "--no-sync"])
+            .contains("already in the manifest")
+    );
+    e.ok(&["add", &url, "--skill", "a"]);
+    assert!(e.codex("a").is_symlink());
+    e.ok(&["add", &other]);
+    assert!(e.codex("x").is_symlink());
+    let doc: toml::Value =
+        toml::from_str(&fs::read_to_string(e.config("skills.toml")).unwrap()).unwrap();
+    assert!(
+        doc["sources"]["all"]["exclude"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    // A bare reference takes the string form, like `name = "owner/repo"`.
+    assert_eq!(doc["skills"]["x"].as_str(), Some("refs"));
+    assert!(doc["sources"]["refs"].get("skills").is_none());
+    e.ok(&["sync", "--locked"]);
+    e.ok(&["configure", "b", "--agent", "claude-code"]);
+    assert!(e.claude("b").is_symlink());
+    assert!(!e.codex("b").exists());
+    let doc: toml::Value =
+        toml::from_str(&fs::read_to_string(e.config("skills.toml")).unwrap()).unwrap();
+    assert_eq!(doc["skills"]["b"]["source"].as_str(), Some("all"));
+}
+
+#[test]
+fn skills_name_declared_sources_with_source_and_older_spellings_still_work() {
+    let e = Env::new();
+    let url = e.repo("group", &[("a", "a"), ("b", "b"), ("c", "c"), ("d", "d")]);
+    let other = e.repo("other", &[("x", "x")]);
+    let legacy = e.repo("legacy", &[("p", "p"), ("q", "q")]);
+    // `[repositories]` and `repository = "alias"` from 0.2.0 sit beside `[sources]`,
+    // the string form, and `source = "alias"`.
+    e.write_manifest(&format!(
+        "[sources.team]\nsource = '{url}'\nskills = ['a']\n\n[repositories.refs]\nsource = '{other}'\n\n[repositories.old]\nsource = '{legacy}'\nskills = ['p']\n\n[skills]\nb = 'team'\nc = {{ source = 'team', agents = ['codex'] }}\nd = {{ repository = 'team', agents = ['claude-code'] }}\nx = 'refs'\n"
+    ));
+    e.ok(&["sync"]);
+    assert!(e.codex("a").is_symlink() && e.claude("a").is_symlink());
+    assert!(e.codex("b").is_symlink() && e.claude("b").is_symlink());
+    assert!(e.codex("c").is_symlink() && !e.claude("c").exists());
+    assert!(e.claude("d").is_symlink() && !e.codex("d").exists());
+    assert!(e.codex("x").is_symlink() && e.codex("p").is_symlink());
+    e.ok(&["sync", "--locked"]);
+    // `add` joins a source wherever it is declared.
+    assert!(
+        e.ok(&["add", &legacy, "--skill", "q", "--no-sync"])
+            .contains("Added q to source `old`")
+    );
+    let doc: toml::Value =
+        toml::from_str(&fs::read_to_string(e.config("skills.toml")).unwrap()).unwrap();
+    assert_eq!(doc["repositories"]["old"]["skills"][1].as_str(), Some("q"));
+    // A bare reference gains settings as a table and returns to the string form.
+    e.ok(&["configure", "x", "--agent", "claude-code", "--no-sync"]);
+    let text = fs::read_to_string(e.config("skills.toml")).unwrap();
+    assert!(
+        text.contains("x = { source = \"refs\", agents = [\"claude-code\"] }"),
+        "{text}"
+    );
+    e.ok(&["configure", "x", "--default-agents", "--no-sync"]);
+    let text = fs::read_to_string(e.config("skills.toml")).unwrap();
+    assert!(text.contains("\nx = \"refs\"\n"), "{text}");
+    e.ok(&["remove", "b"]);
+    assert!(!e.codex("b").exists());
+
+    for (manifest, error) in [
+        (
+            format!("[sources.team]\nsource = '{url}'\n[repositories.team]\nsource = '{url}'\n"),
+            "declare source `team` once",
+        ),
+        (
+            "[xcode]\nskills = '*'\n[repositories.xcode]\napp = 'xcode'\n".into(),
+            "`[xcode]` and `[repositories.xcode]` both exist",
+        ),
+        (
+            "[skills]\ny = 'nope'\n".into(),
+            "skill `y` refers to unknown source `nope`",
+        ),
+        (
+            format!(
+                "[sources.team]\nsource = '{url}'\n[skills]\ny = {{ source = 'team', path = '/tmp' }}\n"
+            ),
+            "can't also set source or path",
+        ),
+        (
+            format!(
+                "[sources.team]\nsource = '{url}'\n[skills]\ny = {{ repository = 'team', source = '{url}' }}\n"
+            ),
+            "can't also set source or path",
+        ),
+    ] {
+        e.write_manifest(&manifest);
+        assert!(e.fails(&["list"]).contains(error), "{manifest}");
+    }
+}
+
+#[test]
+fn add_inserts_into_sorted_skills_tables() {
+    let e = Env::new();
+    let url = e.repo("catalog", &[("b", "b"), ("c", "c"), ("d", "d"), ("z", "z")]);
+    e.write_manifest(&format!("[skills]\nb = '{url}' # first\nd = '{url}'\n"));
+    e.ok(&["add", &url, "--skill", "c", "--no-sync"]);
+    let text = fs::read_to_string(e.config("skills.toml")).unwrap();
+    let keys: Vec<_> = text
+        .lines()
+        .filter_map(|line| line.split_once(" = ").map(|(key, _)| key))
+        .collect();
+    assert_eq!(keys, ["b", "c", "d"]);
+    assert!(text.contains("# first"));
+    // An unsorted table keeps its order and gains the new entry last.
+    e.write_manifest(&format!("[skills]\nd = '{url}'\nb = '{url}'\n"));
+    e.ok(&["add", &url, "--skill", "c", "--no-sync"]);
+    let text = fs::read_to_string(e.config("skills.toml")).unwrap();
+    let keys: Vec<_> = text
+        .lines()
+        .filter_map(|line| line.split_once(" = ").map(|(key, _)| key))
+        .collect();
+    assert_eq!(keys, ["d", "b", "c"]);
+}
+
+#[test]
+fn configure_and_remove_source_list_members() {
+    let e = Env::new();
+    let url = e.repo("group", &[("a", "a"), ("b", "b")]);
+    e.write_manifest(&format!(
+        "[sources.tools]\nsource = '{url}'\nskills = ['a', 'b'] # list\n"
+    ));
+    e.ok(&["sync"]);
+    // An override moves the name out of the list, so it appears once.
+    e.ok(&["configure", "b", "--agent", "codex"]);
+    let text = fs::read_to_string(e.config("skills.toml")).unwrap();
+    assert!(text.contains("skills = ['a'] # list"), "{text}");
+    assert!(text.contains("b = { source = \"tools\", agents = [\"codex\"] }"));
+    assert!(e.codex("b").is_symlink());
+    assert!(!e.claude("b").exists());
+    // Resetting the last override moves it back.
+    e.ok(&["configure", "b", "--default-agents"]);
+    let text = fs::read_to_string(e.config("skills.toml")).unwrap();
+    assert!(text.contains("skills = ['a', \"b\"] # list"), "{text}");
+    let doc: toml::Value = toml::from_str(&text).unwrap();
+    assert!(doc["skills"].get("b").is_none());
+    assert!(e.claude("b").is_symlink());
+    // Resetting a listed member that has no override changes nothing.
+    e.ok(&["configure", "a", "--default-agents"]);
+    assert_eq!(fs::read_to_string(e.config("skills.toml")).unwrap(), text);
+    // A legacy entry that also stays listed settles into one place.
+    e.write_manifest(&format!(
+        "[sources.tools]\nsource = '{url}'\nskills = ['a', 'b']\n[skills]\nb = {{ source = 'tools', agents = ['codex'] }}\n"
+    ));
+    e.ok(&["configure", "b", "--os", "macos", "--no-sync"]);
+    let doc: toml::Value =
+        toml::from_str(&fs::read_to_string(e.config("skills.toml")).unwrap()).unwrap();
+    assert_eq!(
+        doc["sources"]["tools"]["skills"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(doc["skills"]["b"]["os"][0].as_str(), Some("macos"));
+    e.ok(&["remove", "a"]);
+    let text = fs::read_to_string(e.config("skills.toml")).unwrap();
+    assert!(text.contains("skills = []"), "{text}");
+    assert!(!e.codex("a").exists());
+    e.ok(&["remove", "b"]);
+    let doc: toml::Value =
+        toml::from_str(&fs::read_to_string(e.config("skills.toml")).unwrap()).unwrap();
+    assert!(doc["skills"].get("b").is_none());
+    assert!(!e.codex("b").exists());
+    assert!(e.fails(&["remove", "b"]).contains("isn't in the manifest"));
+}
+
+#[test]
+fn add_only_joins_non_github_repositories_written_the_same_way() {
+    let e = Env::new();
+    let plain = e.repo("catalog", &[("a", "a")]);
+    let bare = e.repo("catalog.git", &[("a", "a"), ("b", "b")]);
+    e.write_manifest(&format!(
+        "[sources.tools]\nsource = '{bare}'\nskills = ['b']\n"
+    ));
+    e.ok(&["add", &plain, "--skill", "a", "--no-sync"]);
+    let doc: toml::Value =
+        toml::from_str(&fs::read_to_string(e.config("skills.toml")).unwrap()).unwrap();
+    assert_eq!(doc["skills"]["a"].as_str(), Some(plain.as_str()));
+    assert_eq!(
+        doc["sources"]["tools"]["skills"].as_array().unwrap().len(),
+        1
+    );
+    // A source declared by absolute path is that Git repository, not a local skill.
+    let path = e.remote("catalog.git");
+    e.write_manifest(&format!(
+        "[sources.tools]\nsource = '{}'\nskills = ['b']\n",
+        path.display()
+    ));
+    let out = e.ok(&["add", path.to_str().unwrap(), "--skill", "a", "--no-sync"]);
+    assert!(out.contains("Added a to source `tools`"), "{out}");
+    let text = fs::read_to_string(e.config("skills.toml")).unwrap();
+    assert!(text.contains("skills = [\"a\", 'b']"), "{text}");
+    assert!(!text.contains("[skills]"), "{text}");
+}
+
+#[test]
+fn configure_ignores_wildcard_coverage_from_a_previous_source() {
+    let e = Env::new();
+    let first = e.repo("first", &[("old", "old")]);
+    let second = e.repo("second", &[("x", "x")]);
+    e.write_manifest(&format!(
+        "[sources.tools]\nsource = '{first}'\nskills = '*'\n"
+    ));
+    e.ok(&["sync"]);
+    e.write_manifest(&format!(
+        "[sources.tools]\nsource = '{second}'\nskills = '*'\n"
+    ));
+    let before = fs::read(e.config("skills.toml")).unwrap();
+    assert!(
+        e.fails(&["configure", "old", "--agent", "codex", "--no-sync"])
+            .contains("skl sync")
+    );
+    assert_eq!(fs::read(e.config("skills.toml")).unwrap(), before);
+}
+
+#[test]
+fn add_by_directory_name_to_a_wildcard_writes_a_reference() {
+    let e = Env::new();
+    let url = e.repo("group", &[("lint", "linter"), ("b", "b")]);
+    e.write_manifest(&format!(
+        "[sources.tools]\nsource = '{url}'\nskills = '*'\nexclude = ['linter']\n"
+    ));
+    e.ok(&["sync"]);
+    e.ok(&["add", &url, "--skill", "lint"]);
+    let doc: toml::Value =
+        toml::from_str(&fs::read_to_string(e.config("skills.toml")).unwrap()).unwrap();
+    assert_eq!(doc["skills"]["lint"].as_str(), Some("tools"));
+    assert!(e.codex("lint").is_symlink());
+    assert!(!e.codex("linter").exists());
+}
+
+#[test]
+fn resetting_a_wildcard_member_drops_its_entry() {
+    let e = Env::new();
+    let url = e.repo("group", &[("alpha", "alpha"), ("beta", "beta")]);
+    e.write_manifest(&format!("[sources.team]\nsource = '{url}'\nskills = '*'\n"));
+    e.ok(&["sync"]);
+    e.ok(&["configure", "alpha", "--agent", "claude-code"]);
+    assert!(!e.codex("alpha").exists());
+    // The wildcard selects alpha again, so no `alpha = "team"` pins it.
+    e.ok(&["configure", "alpha", "--default-agents"]);
+    let doc: toml::Value =
+        toml::from_str(&fs::read_to_string(e.config("skills.toml")).unwrap()).unwrap();
+    assert!(doc["skills"].get("alpha").is_none());
+    assert!(e.codex("alpha").is_symlink());
+    // An excluded member keeps its reference, which is what selects it.
+    e.write_manifest(&format!(
+        "[sources.team]\nsource = '{url}'\nskills = '*'\nexclude = ['beta']\n[skills]\nbeta = {{ source = 'team', agents = ['codex'] }}\n"
+    ));
+    e.ok(&["configure", "beta", "--default-agents"]);
+    let doc: toml::Value =
+        toml::from_str(&fs::read_to_string(e.config("skills.toml")).unwrap()).unwrap();
+    assert_eq!(doc["skills"]["beta"].as_str(), Some("team"));
+    assert!(e.codex("beta").is_symlink());
 }
 
 #[test]
@@ -4139,7 +4568,7 @@ fn adopt_rejects_generated_and_unknown_wildcard_names_before_copying() {
     env.write_manifest("[xcode]\nskills = '*'\n");
     assert!(
         env.fails(&["adopt", "review", "--from", "claude-code", "--no-sync"])
-            .contains("no complete cached export")
+            .contains("coverage is missing or stale")
     );
     assert!(!env.config("local").exists());
 }
@@ -4291,7 +4720,7 @@ fn verify_git_content_detects_resource_type_symlink_mode_and_membership_drift() 
     assert!(!result.status.success());
     assert!(result.stderr.is_empty());
     let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
-    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["schema_version"], 2);
     assert_eq!(report["command"], "verify");
     assert_eq!(report["status"], "unhealthy");
     assert_eq!(report["data"]["skills"][0]["status"], "drift");
@@ -4408,7 +4837,7 @@ fn verify_xcode_digest_needs_no_tools_and_detects_content_changes() {
     let verified = e.skl_with_env(&["verify", "--json"], &[("PATH", no_tools.as_os_str())]);
     assert!(verified.status.success());
     let report: serde_json::Value = serde_json::from_slice(&verified.stdout).unwrap();
-    assert_eq!(report["data"]["skills"][0]["source_kind"], "xcode");
+    assert_eq!(report["data"]["skills"][0]["source_kind"], "app");
     assert_eq!(report["data"]["skills"][0]["status"], "verified");
     assert_eq!(verification_snapshot(&e.home), before);
     fs::write(target.join("SKILL.md"), "altered").unwrap();
@@ -4638,11 +5067,28 @@ fn saved_plan_xcode_selected_updates_preserve_other_pins_and_review_removals() {
     assert!(body(&e.codex("gone")).contains("removed content"));
     assert!(e.xcode(&["update", "--plan", "all.toml"]).status.success());
     let plan = fs::read_to_string(e.home.join("all.toml")).unwrap();
-    assert!(plan.contains("removed:xcode:gone"));
+    assert!(plan.contains("removed:app:gone"));
     assert!(plan.contains("-removed content"));
     e.ok(&["update", "--apply-plan", "all.toml"]);
     assert!(!e.codex("gone").exists());
     assert!(body(&e.codex("b")).contains("unselected b"));
+}
+
+#[test]
+fn saved_plan_keeps_an_app_source_exported_by_an_earlier_command() {
+    let e = Env::new();
+    let url = e.repo("onlygit", &[("a", "a")]);
+    let manifest = format!(
+        "[skills]\na = '{url}'\n[sources.xcode]\napp = 'xcode'\nskills = '*'\nos = ['macos', 'linux']\n"
+    );
+    e.write_manifest(&manifest);
+    e.export_xcode(&[("apple", "v1")], "Xcode 27");
+    assert!(e.xcode(&["sync"]).status.success());
+    // A new timeout changes the export command, but this plan only updates `a`.
+    e.write_manifest(&format!("{manifest}timeout = 60\n"));
+    e.ok(&["update", "a", "--plan", "git.toml"]);
+    e.ok(&["update", "--apply-plan", "git.toml"]);
+    assert!(body(&e.codex("apple")).contains("v1"));
 }
 
 #[test]
@@ -4690,9 +5136,7 @@ fn saved_plan_payload_tampering_is_rejected() {
     let original = fs::read_to_string(e.home.join("review.toml")).unwrap();
     for alteration in ["bytes", "path", "mode"] {
         let mut plan: toml::Value = toml::from_str(&original).unwrap();
-        let nodes = plan["xcode_snapshots"]["a"]["nodes"]
-            .as_table_mut()
-            .unwrap();
+        let nodes = plan["app_snapshots"]["a"]["nodes"].as_table_mut().unwrap();
         match alteration {
             "bytes" => {
                 nodes.get_mut("SKILL.md").unwrap()["bytes"] =
@@ -4774,7 +5218,7 @@ fn saved_plan_xcode_dry_apply_previews_replacement_and_detects_conflicts() {
     assert!(!output.contains("removed"), "{output}");
     assert!(output.contains("2 links repointed"), "{output}");
     assert_eq!(
-        fs::read_dir(e.home.join(".local/share/skl/store/xcode"))
+        fs::read_dir(e.home.join(".local/share/skl/store/commands"))
             .unwrap()
             .count(),
         1
@@ -4823,7 +5267,7 @@ fn saved_plan_wildcard_exclusions_preserve_complete_coverage() {
     assert!(!e.codex("later").exists());
     let lock: toml::Value =
         toml::from_str(&fs::read_to_string(e.config("skills.lock")).unwrap()).unwrap();
-    assert!(lock["repositories"]["team"]["members"].get("a").is_some());
+    assert!(lock["sources"]["team"]["members"].get("a").is_some());
     assert!(lock["skills"].get("a").is_none());
 }
 
@@ -5167,4 +5611,181 @@ fn command_normalization_and_targeted_update() {
     env.app_ok(&["update", "local"]);
     assert!(!env.remotes.join("ran").exists());
     assert_eq!(lock, fs::read(env.config("skills.lock")).unwrap());
+}
+
+#[test]
+fn app_source_exports_select_and_override_like_any_source() {
+    let e = Env::new();
+    let root = e.remotes.display().to_string();
+    for name in ["alpha", "beta", "gamma"] {
+        write_skill(&e.remotes.join("collection").join(name), name, "v1");
+    }
+    // A collection must name its output directory.
+    e.write_manifest(&format!(
+        "[sources.tools]\ncommand = ['skl-test-app', '{root}', '--collection']\nskills = '*'\n"
+    ));
+    assert!(e.fails(&["list"]).contains("{output}"));
+    e.write_manifest(&format!(
+        "[sources.tools]\ncommand = ['skl-test-app', '{root}', '--collection', '{{output}}']\nversion-command = ['skl-test-app', '{root}', '--version']\nskills = '*'\nexclude = ['gamma']\n\n[skills]\nbeta = {{ source = 'tools', agents = ['codex'] }}\n"
+    ));
+    let out = e.app_ok(&["sync"]);
+    assert!(out.contains("tools app 1.2.3"), "{out}");
+    assert!(e.claude("alpha").is_symlink() && e.codex("alpha").is_symlink());
+    assert!(e.codex("beta").is_symlink() && !e.claude("beta").exists());
+    assert!(!e.codex("gamma").exists());
+    let lock: toml::Value =
+        toml::from_str(&fs::read_to_string(e.config("skills.lock")).unwrap()).unwrap();
+    assert_eq!(lock["version"].as_integer(), Some(3));
+    // Members share the source's command and version, recording only a digest.
+    assert!(lock.get("commands").is_none());
+    let tools = &lock["sources"]["tools"];
+    assert_eq!(tools["version"].as_str(), Some("app 1.2.3"));
+    assert_eq!(tools["command"][0].as_str(), Some("skl-test-app"));
+    assert_eq!(tools["snapshots"]["alpha"].as_str().map(str::len), Some(64));
+    assert!(tools["members"].get("gamma").is_some());
+    // Locked installs use the cache without running the app.
+    fs::remove_file(e.remotes.join("ran")).unwrap();
+    e.app_ok(&["sync", "--locked"]);
+    assert!(!e.remotes.join("ran").exists());
+    assert!(e.app_ok(&["list"]).contains("app: tools"));
+    // Members are removed and configured like any source's, and the
+    // automatic sync after an edit never runs the export.
+    let out = e.app_ok(&["remove", "alpha"]);
+    assert!(out.contains("tools: app export requires an explicit sync or update"));
+    assert!(!e.remotes.join("ran").exists());
+    assert!(!e.codex("alpha").exists());
+    assert!(e.codex("beta").is_symlink());
+    let manifest: toml::Value =
+        toml::from_str(&fs::read_to_string(e.config("skills.toml")).unwrap()).unwrap();
+    let excluded = manifest["sources"]["tools"]["exclude"].as_array().unwrap();
+    assert!(excluded.iter().any(|v| v.as_str() == Some("alpha")));
+    assert!(
+        e.fails(&["configure", "gamma", "--agent", "codex", "--no-sync"])
+            .contains("isn't in the manifest")
+    );
+    e.app_ok(&["sync"]);
+    assert!(!e.codex("alpha").exists());
+    // Plans never run arbitrary commands, so they reject command sources.
+    assert!(
+        e.fails(&["update", "--plan", "review.toml"])
+            .contains("do not support command imports")
+    );
+}
+
+#[test]
+fn xcode_is_an_app_source_that_skips_when_xcode_is_missing() {
+    let env = Env::new();
+    env.write_manifest(
+        "[sources.xcode]\napp = 'xcode'\nos = ['macos', 'linux']\nskills = ['alpha', 'beta']\n",
+    );
+    env.export_xcode(&[("alpha", "v1"), ("beta", "v1")], "Xcode 27");
+    assert!(env.xcode(&["sync"]).status.success());
+    assert!(env.codex("alpha").is_symlink());
+    let lock = fs::read(env.config("skills.lock")).unwrap();
+    // A Mac with only the Command Line Tools skips Xcode like any missing app.
+    fs::write(env.remotes.join("missing"), "").unwrap();
+    fs::remove_file(env.remotes.join("called")).unwrap();
+    let out = env.xcode(&["sync"]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("xcode: app unavailable; skipping"));
+    assert!(!env.remotes.join("called").exists());
+    assert!(!env.codex("alpha").exists());
+    assert_eq!(lock, fs::read(env.config("skills.lock")).unwrap());
+    // The cached export still installs with --locked, without asking Xcode.
+    assert!(env.xcode(&["sync", "--locked"]).status.success());
+    assert!(body(&env.codex("alpha")).contains("v1"));
+    assert!(!env.remotes.join("called").exists());
+    fs::remove_file(env.remotes.join("missing")).unwrap();
+
+    // Configuring a member moves it out of the list into an override.
+    env.ok(&["configure", "beta", "--agent", "codex", "--no-sync"]);
+    let manifest: toml::Value =
+        toml::from_str(&fs::read_to_string(env.config("skills.toml")).unwrap()).unwrap();
+    assert_eq!(
+        manifest["sources"]["xcode"]["skills"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(manifest["skills"]["beta"]["source"].as_str(), Some("xcode"));
+    assert!(env.xcode(&["sync"]).status.success());
+    assert!(env.codex("beta").is_symlink());
+    assert!(!env.claude("beta").exists());
+    // Only placement can be overridden for an app's skill.
+    env.write_manifest(
+        "[sources.xcode]\napp = 'xcode'\nskills = '*'\n[skills]\nbeta = { source = 'xcode', ref = 'main' }\n",
+    );
+    assert!(
+        env.fails(&["list"])
+            .contains("can only override agents, profiles, and os")
+    );
+    env.write_manifest("[xcode]\nskills = '*'\n[sources.xcode]\napp = 'xcode'\nskills = '*'\n");
+    assert!(env.fails(&["list"]).contains("declare Xcode once"));
+    env.write_manifest(
+        "[sources.xcode]\napp = 'xcode'\ncommand = ['x', '{output}']\nskills = '*'\n",
+    );
+    assert!(env.fails(&["list"]).contains("either `app` or `command`"));
+}
+
+#[test]
+fn version_two_xcode_locks_keep_working_and_migrate_on_the_next_export() {
+    let env = Env::new();
+    env.write_manifest("[xcode]\nos = ['macos', 'linux']\nskills = '*'\n");
+    env.export_xcode(&[("alpha", "v1")], "Xcode 27");
+    assert!(env.xcode(&["sync"]).status.success());
+    // Rebuild what version 2 wrote: an [xcode] lock table and store/xcode content.
+    let lock: toml::Value =
+        toml::from_str(&fs::read_to_string(env.config("skills.lock")).unwrap()).unwrap();
+    let digest = lock["sources"]["xcode"]["snapshots"]["alpha"]
+        .as_str()
+        .unwrap();
+    let store = env.home.join(".local/share/skl/store");
+    let legacy = store.join("xcode").join(digest).join("alpha");
+    fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    fs::rename(store.join("commands").join(digest).join("alpha"), &legacy).unwrap();
+    for link in [env.claude("alpha"), env.codex("alpha")] {
+        fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&legacy, &link).unwrap();
+    }
+    let state = env.home.join(".local/share/skl/state.toml");
+    let text = fs::read_to_string(&state).unwrap();
+    fs::write(&state, text.replace("store/commands/", "store/xcode/")).unwrap();
+    let old = format!(
+        "version = 2\nxcode_all_complete = true\n\n[xcode.alpha]\nversion = \"Xcode 27\"\ndigest = \"{digest}\"\n"
+    );
+    fs::write(env.config("skills.lock"), &old).unwrap();
+
+    // Locked installs read the old lock and cache without rewriting either.
+    fs::remove_file(env.remotes.join("called")).unwrap();
+    assert!(env.xcode(&["sync", "--locked"]).status.success());
+    assert!(!env.remotes.join("called").exists());
+    assert_eq!(fs::read_to_string(env.config("skills.lock")).unwrap(), old);
+    assert_eq!(fs::read_link(env.codex("alpha")).unwrap(), legacy);
+    assert!(env.ok(&["list"]).contains("app: xcode"));
+    env.ok(&["verify"]);
+
+    // The next export moves the snapshot under commands and upgrades the lock.
+    assert!(env.xcode(&["sync"]).status.success());
+    let text = fs::read_to_string(env.config("skills.lock")).unwrap();
+    let lock: toml::Value = toml::from_str(&text).unwrap();
+    assert_eq!(lock["version"].as_integer(), Some(3));
+    let xcode = &lock["sources"]["xcode"];
+    assert_eq!(xcode["snapshots"]["alpha"].as_str(), Some(digest));
+    assert_eq!(xcode["version"].as_str(), Some("Xcode 27"));
+    assert!(xcode["members"].get("alpha").is_some());
+    assert!(lock.get("xcode").is_none() && lock.get("commands").is_none());
+    let target = fs::read_link(env.codex("alpha")).unwrap();
+    assert!(target.starts_with(store.join("commands")));
+    assert!(body(&env.codex("alpha")).contains("v1"));
+    assert!(!store.join("xcode").join(digest).exists());
+    assert!(env.xcode(&["sync", "--locked"]).status.success());
+    // `remove` excludes a wildcard member, even under the [xcode] shorthand.
+    env.ok(&["remove", "alpha"]);
+    assert!(
+        fs::read_to_string(env.config("skills.toml"))
+            .unwrap()
+            .contains("exclude = [\"alpha\"]")
+    );
+    assert!(!env.codex("alpha").exists());
 }

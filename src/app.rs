@@ -8,10 +8,10 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::{
-    lock::{CommandSkill, XcodeSkill},
+    export::Snapshot,
+    lock::{CommandSkill, Provenance},
     manifest::CommandOrigin,
     paths::Paths,
-    xcode::Snapshot,
 };
 use anyhow::{Context, Result, bail};
 
@@ -126,7 +126,14 @@ fn tree_limit(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn run(argv: &[String], program: &Path, cwd: &Path, dest: &Path, timeout: u64) -> Result<Vec<u8>> {
+fn run(
+    argv: &[String],
+    program: &Path,
+    cwd: &Path,
+    dest: &Path,
+    timeout: u64,
+    environment: &[&str],
+) -> Result<Vec<u8>> {
     let mut command = Command::new(program);
     for arg in &argv[1..] {
         if arg == "{output}" {
@@ -143,6 +150,11 @@ fn run(argv: &[String], program: &Path, cwd: &Path, dest: &Path, timeout: u64) -
         .env("TMPDIR", cwd)
         .env("LANG", "C")
         .env("LC_ALL", "C")
+        .envs(
+            environment
+                .iter()
+                .filter_map(|key| Some((key, std::env::var_os(key)?))),
+        )
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -179,6 +191,57 @@ fn run(argv: &[String], program: &Path, cwd: &Path, dest: &Path, timeout: u64) -
     }
 }
 
+/// Whether a probe command runs and exits successfully. A missing program is false.
+pub fn succeeds(argv: &[String], environment: &[&str]) -> Result<bool> {
+    let Some(program) = executable(&argv[0])? else {
+        return Ok(false);
+    };
+    let stage = tempfile::tempdir()?;
+    Ok(run(
+        argv,
+        &program,
+        stage.path(),
+        &stage.path().join("output"),
+        30,
+        environment,
+    )
+    .is_ok())
+}
+
+/// Runs an export command that writes into `dest`, within `cwd`'s limits.
+pub fn export(origin: &CommandOrigin, cwd: &Path, dest: &Path, environment: &[&str]) -> Result<()> {
+    let program = executable(&origin.command[0])?
+        .with_context(|| format!("{} is unavailable", origin.command[0]))?;
+    run(
+        &origin.command,
+        &program,
+        cwd,
+        dest,
+        origin.timeout,
+        environment,
+    )?;
+    tree_limit(cwd)
+}
+
+/// The trimmed output of the optional version probe, recorded as provenance.
+pub fn version(origin: &CommandOrigin, environment: &[&str]) -> Result<String> {
+    let Some(argv) = &origin.version_command else {
+        return Ok(String::new());
+    };
+    let program = executable(&argv[0])?.context("version-command executable is unavailable")?;
+    let probe = tempfile::tempdir()?;
+    Ok(String::from_utf8(run(
+        argv,
+        &program,
+        probe.path(),
+        &probe.path().join("output"),
+        origin.timeout,
+        environment,
+    )?)?
+    .trim()
+    .to_owned())
+}
+
 /// None means the producer is not installed. All execution/validation failures
 /// are errors, including a missing optional version probe.
 pub fn import(origin: &CommandOrigin) -> Result<Option<(CommandSkill, Snapshot)>> {
@@ -193,6 +256,7 @@ pub fn import(origin: &CommandOrigin) -> Result<Option<(CommandSkill, Snapshot)>
         stage.path(),
         &dest,
         origin.timeout,
+        &[],
     )?;
     if !origin.command.iter().any(|a| a == "{output}") {
         fs::create_dir(&dest)?;
@@ -210,31 +274,18 @@ pub fn import(origin: &CommandOrigin) -> Result<Option<(CommandSkill, Snapshot)>
     if text.trim().is_empty() || text.contains('\0') {
         bail!("SKILL.md must contain nonempty text without NUL bytes");
     }
-    let normalized = crate::xcode::normalize_frontmatter(&text);
+    let normalized = crate::export::normalize_frontmatter(&text);
     if text != normalized {
         fs::write(&skill, normalized)?;
     }
     let snapshot = Snapshot::capture(&dest)?;
-    let digest = crate::xcode::content_digest(&dest)?;
-    let version = if let Some(argv) = &origin.version_command {
-        let program = executable(&argv[0])?.context("version-command executable is unavailable")?;
-        let probe = tempfile::tempdir()?;
-        String::from_utf8(run(
-            argv,
-            &program,
-            probe.path(),
-            &probe.path().join("output"),
-            origin.timeout,
-        )?)?
-        .trim()
-        .to_owned()
-    } else {
-        String::new()
-    };
+    let digest = crate::export::content_digest(&dest)?;
+    let version = version(origin, &[])?;
     Ok(Some((
         CommandSkill {
             producer: origin.clone(),
-            snapshot: XcodeSkill { version, digest },
+            repository: None,
+            snapshot: Provenance { version, digest },
         },
         snapshot,
     )))

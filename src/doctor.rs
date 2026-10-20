@@ -60,11 +60,11 @@ pub fn collect(paths: &Paths, active: &Active) -> Result<Vec<Diagnostic>> {
     for alias in crate::repositories::pending(paths, &manifest, &lock.repositories, active)? {
         issue(
             &mut out,
-            "repository-not-locked",
+            "source-not-locked",
             None,
             Some(paths.lock()),
-            format!("repository `{alias}` wildcard coverage is missing or stale"),
-            "Run skl sync to discover the repository skills.",
+            format!("source `{alias}` wildcard coverage is missing or stale"),
+            "Run skl sync to discover the source's skills.",
         );
     }
     for name in lock.skills.keys() {
@@ -82,36 +82,41 @@ pub fn collect(paths: &Paths, active: &Active) -> Result<Vec<Diagnostic>> {
             );
         }
     }
-    for name in lock.xcode.keys() {
+    for (name, entry) in &lock.commands {
+        let Some(alias) = &entry.repository else {
+            continue;
+        };
         if manifest
-            .xcode
-            .as_ref()
-            .is_none_or(|config| config.enabled(active) && !config.selects(name))
+            .apps
+            .get(alias)
+            .is_none_or(|app| app.enabled(active) && !app.selects(name))
         {
             issue(
                 &mut out,
                 "stale-lock",
                 Some(name),
                 Some(paths.lock()),
-                "Xcode lock entry is no longer selected by the manifest".into(),
+                format!("source `{alias}` lock entry is no longer selected by the manifest"),
                 "Run skl sync to reconcile the lockfile.",
             );
         }
     }
-    if lock.xcode_all_complete
-        && manifest
-            .xcode
-            .as_ref()
-            .is_none_or(|config| config.enabled(active) && config.skills.is_some())
-    {
-        issue(
-            &mut out,
-            "stale-lock",
-            None,
-            Some(paths.lock()),
-            "Xcode wildcard coverage no longer matches the selection".into(),
-            "Run skl sync to reconcile the lockfile.",
-        );
+    for (alias, coverage) in &lock.repositories {
+        if coverage.producer.is_some()
+            && manifest
+                .apps
+                .get(alias)
+                .is_none_or(|app| app.enabled(active) && app.skills.is_some())
+        {
+            issue(
+                &mut out,
+                "stale-lock",
+                None,
+                Some(paths.lock()),
+                format!("source `{alias}` wildcard coverage no longer matches the selection"),
+                "Run skl sync to reconcile the lockfile.",
+            );
+        }
     }
     let local_names: BTreeSet<_> = manifest
         .skills
@@ -137,32 +142,20 @@ pub fn collect(paths: &Paths, active: &Active) -> Result<Vec<Diagnostic>> {
             }
         }
     }
-    if let Some(config) = &manifest.xcode
-        && config.enabled(active)
-        && config.skills.as_ref().is_none_or(|names| !names.is_empty())
-    {
-        if !available("xcrun") {
+    for (alias, app) in &manifest.apps {
+        let tool = &app.producer.command[0];
+        if app.enabled(active) && !app.is_empty() && !available(tool) {
             issue(
                 &mut out,
                 "missing-tool",
                 None,
                 None,
-                "`xcrun` is not executable on PATH".into(),
-                "Install/select Xcode before refreshing Xcode skills; cached skills can still be used with skl sync --locked.",
-            );
-        }
-        if config.skills.is_none() && !lock.xcode_all_complete {
-            issue(
-                &mut out,
-                "xcode-not-locked",
-                None,
-                Some(paths.lock()),
-                "Xcode wildcard selection has no complete cached export".into(),
-                "Run skl sync on a machine with Xcode configured.",
+                format!("`{tool}` for source `{alias}` is not executable on PATH"),
+                "Install the app before refreshing its skills; cached skills can still be used with skl sync --locked.",
             );
         }
     }
-    crate::xcode::append_skills(paths, &mut manifest, &lock.xcode)?;
+    crate::export::append(paths, &mut manifest, &lock.commands, &Default::default())?;
     let mut expected = BTreeMap::new();
     let mut selected = BTreeSet::new();
     for skill in manifest.skills.iter().filter(|s| s.enabled(active)) {

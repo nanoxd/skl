@@ -76,6 +76,11 @@ manifest stores the repository, ref, and directory separately, so subsequent
 syncs and updates use the same selection. `@skill` selects by skill or directory
 name and cannot be combined with a different `--skill` or with `--all`.
 
+When a [declared source](configuration.md#declared-sources) already names the
+repository, `add` adds the skill to that source instead. The ref and directory are
+only recorded when the source's own ref and name lookup would not find the same
+skill.
+
 A tree URL normally uses the first segment after `tree/` as its ref. If an
 advertised branch or tag containing slashes also matches the URL, skl asks for
 an explicit `--ref` rather than guessing. For example, append
@@ -182,6 +187,6 @@ published snapshot, and failed manifest publication removes the new snapshot.
 `--dry-run` validates and previews without writing configuration, state, locks,
 store content, or links.
 
-Names supplied by cached repository collections or Xcode imports also count as
-existing declarations. If wildcard membership has not been cached completely,
+Names supplied by the cached membership of declared sources, including Xcode,
+also count as existing declarations. If wildcard membership has not been cached completely,
 run `skl sync` first so adoption can check for collisions before copying.

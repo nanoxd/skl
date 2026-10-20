@@ -22,32 +22,14 @@ pub struct Manifest {
     /// The agents skills link into unless they name their own.
     pub agents: Vec<Agent>,
     pub skills: Vec<Skill>,
-    pub xcode: Option<Xcode>,
+    /// Git repositories selecting `"*"`, expanded once their membership is known.
     pub repositories: std::collections::BTreeMap<String, crate::repositories::Repository>,
-}
-
-pub struct Xcode {
-    /// None selects every exported skill.
-    pub skills: Option<Vec<String>>,
-    pub agents: Vec<Agent>,
-    pub profiles: Vec<String>,
-    pub os: Vec<String>,
+    /// Repositories whose skills an installed app exports, including Xcode.
+    pub apps: std::collections::BTreeMap<String, crate::export::App>,
 }
 
 pub fn matches_os(os: &[String]) -> bool {
     os.is_empty() || os.iter().any(|name| name == std::env::consts::OS)
-}
-
-impl Xcode {
-    pub fn enabled(&self, active: &crate::profile::Active) -> bool {
-        matches_os(&self.os) && active.includes(&self.profiles)
-    }
-
-    pub fn selects(&self, name: &str) -> bool {
-        self.skills
-            .as_ref()
-            .is_none_or(|names| names.iter().any(|n| n == name))
-    }
 }
 
 pub struct Skill {
@@ -111,50 +93,42 @@ pub fn parse(text: &str, paths: &Paths) -> Result<Manifest> {
             .map(|id| agents::resolve(id, paths))
             .collect::<Result<_>>()?,
     };
-    let repositories = crate::repositories::parse(&mut table, &default_agents, paths)?;
-    let xcode = table
-        .remove("xcode")
-        .map(|value| -> Result<Xcode> {
-            let Value::Table(mut config) = value else {
-                bail!("`xcode` must be a table")
-            };
-            let skills = match config.remove("skills") {
-                Some(Value::String(s)) if s == "*" => None,
-                Some(Value::Array(items)) => {
-                    let mut names = Vec::new();
-                    for item in items {
-                        let Value::String(name) = item else {
-                            bail!("`xcode.skills` must contain names")
-                        };
-                        validate_name(&name)?;
-                        if !names.contains(&name) {
-                            names.push(name);
-                        }
-                    }
-                    Some(names)
-                }
-                _ => bail!("set `xcode.skills` to `\"*\"` or an array of names"),
-            };
-            if let Some(key) = config
-                .keys()
-                .find(|k| !matches!(k.as_str(), "agents" | "profiles" | "os"))
+    // `[xcode]` is shorthand for the Xcode app source.
+    if let Some(value) = table.remove("xcode") {
+        let Value::Table(mut config) = value else {
+            bail!("`xcode` must be a table")
+        };
+        if !matches!(
+            config.get("skills"),
+            Some(Value::String(_) | Value::Array(_))
+        ) {
+            bail!("set `xcode.skills` to `\"*\"` or an array of names");
+        }
+        if let Some(key) = config.keys().find(|k| {
+            !matches!(
+                k.as_str(),
+                "skills" | "exclude" | "agents" | "profiles" | "os"
+            )
+        }) {
+            bail!("unknown xcode key `{key}`");
+        }
+        config.insert("app".into(), Value::String(crate::export::XCODE.into()));
+        for key in crate::repositories::TABLES {
+            if let Some(Value::Table(declared)) = table.get(key)
+                && declared.contains_key(crate::export::XCODE)
             {
-                bail!("unknown xcode key `{key}`");
+                bail!("declare Xcode once: `[xcode]` and `[{key}.xcode]` both exist");
             }
-            config
-                .entry("os".to_string())
-                .or_insert_with(|| Value::Array(vec![Value::String("macos".into())]));
-            // Reuse per-skill agents, profiles and OS validation.
-            config.insert("path".into(), Value::String(".".into()));
-            let options = parse_skill("xcode", Value::Table(config), &default_agents, paths)?;
-            Ok(Xcode {
-                skills,
-                agents: options.agents,
-                profiles: options.profiles,
-                os: options.os,
-            })
-        })
-        .transpose()?;
+        }
+        let declarations = table
+            .entry("sources")
+            .or_insert_with(|| Value::Table(Table::new()));
+        let Value::Table(declarations) = declarations else {
+            bail!("`sources` must be a table")
+        };
+        declarations.insert(crate::export::XCODE.into(), Value::Table(config));
+    }
+    let (repositories, apps) = crate::repositories::parse(&mut table, &default_agents, paths)?;
     let skills = match table.remove("skills") {
         Some(Value::Table(skills)) => skills,
         Some(_) => bail!("`skills` must be a table"),
@@ -174,8 +148,8 @@ pub fn parse(text: &str, paths: &Paths) -> Result<Manifest> {
     Ok(Manifest {
         agents: default_agents,
         skills: parsed,
-        xcode,
         repositories,
+        apps,
     })
 }
 

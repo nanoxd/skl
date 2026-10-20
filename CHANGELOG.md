@@ -4,6 +4,55 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- App sources: `[sources.<alias>]` with a `command` that exports several skills
+  into `{output}`, selected with `skills`, `exclude`, and per-skill overrides like
+  a Git source. Exports run only on explicit `sync` and `update`.
+
+### Changed
+
+- `[sources.<alias>]` replaces `[repositories.<alias>]`, which still works, and
+  declares Git and app sources alike. Skills refer to a declared source with
+  `source = "alias"` or `name = "alias"`, where a bare name without `/` or `:` is
+  an alias and an unknown one is an error. `repository = "alias"` still works. Each
+  alias is declared once across `[sources]`, `[repositories]`, and `[xcode]`.
+
+- Xcode is an app source, `[sources.xcode]` with `app = "xcode"`, and `[xcode]`
+  remains shorthand for it. Xcode skills gain `exclude`, per-skill overrides,
+  `configure`, and `remove`. A Mac without Xcode, including one with only the
+  Command Line Tools, skips its skills like any missing app instead of failing
+  every sync. The export runs with the same limits and minimal environment as other
+  app commands, keeping `DEVELOPER_DIR`.
+
+- Lock version 3 writes each app source's command and app version once under
+  `[sources.<alias>]`, with one content digest line per skill, so an Xcode skill
+  takes one lock line, or two with `"*"`, instead of repeating the Xcode version.
+  A `"*"` selection also records its complete export there, and Git wildcard
+  coverage moves from `[repositories]` to `[sources]`. Version 1 and 2 locks
+  migrate when next written, `sync --locked` leaves them untouched, and content
+  cached under `store/xcode` is reused until the next export moves it.
+
+- JSON output uses `schema_version: 2`. App source members report `origin: "app"`,
+  their source's alias as `source`, and `command` provenance instead of `xcode`.
+  `source-not-locked` replaces `xcode-not-locked` and `repository-not-locked`, and
+  `verify` reports `source_kind: "app"`. Saved update plans use format version 3,
+  with `source:ALIAS` destinations, and reject app sources with a `command`.
+
+- `add` places skills from a declared Git source into that source, like `cargo add`
+  inheriting a workspace dependency. Lists gain the name, alias-only sources gain a
+  `name = "alias"` entry, and wildcard sources drop an exclusion. Refs,
+  directories and agent, OS or profile settings the source doesn't already provide
+  become a `source = "alias"` override. Sorted lists and `[skills]` tables stay
+  sorted, and the output names any agents, OS or profile restrictions the skill
+  inherits.
+
+- `configure` and `remove` accept skills selected by a declared source's list, and
+  `configure` also accepts cached wildcard members. Configuring a member writes a
+  `source = "alias"` override entry and takes the name out of the list, so each
+  name appears once. Resetting the last override returns it to the list or the
+  wildcard.
+
 ## [0.3.0] - 2026-10-18
 
 ### Added

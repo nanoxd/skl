@@ -59,7 +59,7 @@ impl Context {
         for (alias, group) in &parsed.repositories {
             let skill = group.skill(alias, &parsed.agents, paths)?;
             destinations.insert(
-                format!("repository:{alias}"),
+                format!("source:{alias}"),
                 skill
                     .agents
                     .iter()
@@ -67,13 +67,20 @@ impl Context {
                     .collect::<Result<Vec<_>>>()?,
             );
         }
-        if let Some(config) = &parsed.xcode {
-            for agent in &config.agents {
-                destinations.insert(
-                    format!("xcode:{}", agent.dir.display()),
-                    vec![absolute(&agent.dir)?],
-                );
+        for (alias, app) in &parsed.apps {
+            let mut dirs = Vec::new();
+            for agent in app
+                .overrides
+                .values()
+                .chain([&app.defaults])
+                .flat_map(|t| &t.agents)
+            {
+                let dir = absolute(&agent.dir)?;
+                if !dirs.contains(&dir) {
+                    dirs.push(dir);
+                }
             }
+            destinations.insert(format!("source:{alias}"), dirs);
         }
         for skill in skills {
             destinations.insert(
@@ -111,8 +118,9 @@ pub struct Plan {
     pub target: Lock,
     /// Full patches are stored with the exact target commits for review.
     changes: BTreeMap<String, String>,
+    /// Reviewed content of app source members, which can't be fetched again.
     #[serde(default)]
-    pub xcode_snapshots: BTreeMap<String, crate::xcode::Snapshot>,
+    pub app_snapshots: BTreeMap<String, crate::export::Snapshot>,
     checksum: String,
 }
 
@@ -124,14 +132,14 @@ impl Plan {
             names: &'a [String],
             target: &'a Lock,
             changes: &'a BTreeMap<String, String>,
-            xcode_snapshots: &'a BTreeMap<String, crate::xcode::Snapshot>,
+            app_snapshots: &'a BTreeMap<String, crate::export::Snapshot>,
         }
         let payload = Payload {
             context: &self.context,
             names: &self.names,
             target: &self.target,
             changes: &self.changes,
-            xcode_snapshots: &self.xcode_snapshots,
+            app_snapshots: &self.app_snapshots,
         };
         Ok(format!(
             "{:x}",
@@ -145,7 +153,7 @@ impl Plan {
                 .with_context(|| format!("reading plan {}", paths.tilde(file)))?,
         )
         .with_context(|| format!("invalid update plan {}", paths.tilde(file)))?;
-        if plan.version != 2 {
+        if plan.version != 3 {
             bail!("unsupported update plan version {}", plan.version);
         }
         if plan.context != Context::read(paths, active)? {
@@ -163,7 +171,7 @@ impl Plan {
             let enabled = group.skill(alias, &manifest.agents, paths)?.enabled(active);
             if !enabled {
                 if coverage != old.repositories.get(alias) {
-                    bail!("plan changes inactive repository `{alias}`");
+                    bail!("plan changes inactive source `{alias}`");
                 }
             } else {
                 let coverage = coverage.context("plan missing wildcard coverage")?;
@@ -172,13 +180,24 @@ impl Plan {
                 }
             }
         }
-        if plan
-            .target
-            .repositories
-            .keys()
-            .any(|alias| !manifest.repositories.contains_key(alias))
-        {
-            bail!("unexpected repository in plan");
+        for (alias, app) in &manifest.apps {
+            let coverage = plan.target.repositories.get(alias);
+            if !app.enabled(active) {
+                if coverage != old.repositories.get(alias) {
+                    bail!("plan changes inactive source `{alias}`");
+                }
+            } else if coverage.is_some_and(|c| {
+                // An unrelated update keeps coverage from an earlier command.
+                (app.skills.is_some() || c.producer.as_ref() != Some(&app.producer))
+                    && Some(c) != old.repositories.get(alias)
+            }) {
+                bail!("plan wildcard source mismatch");
+            }
+        }
+        if plan.target.repositories.keys().any(|alias| {
+            !manifest.repositories.contains_key(alias) && !manifest.apps.contains_key(alias)
+        }) {
+            bail!("unexpected source in plan");
         }
         for coverage in plan.target.repositories.values() {
             for (name, subdir) in &coverage.members {
@@ -194,36 +213,58 @@ impl Plan {
             }
         }
         crate::repositories::append(paths, &mut manifest, &plan.target.repositories)?;
-        if let Some(config) = &manifest.xcode {
-            if !config.enabled(active)
-                && (plan.target.xcode != old.xcode
-                    || plan.target.xcode_all_complete != old.xcode_all_complete)
+        // Plans never run single-skill commands, so those entries must not change.
+        for (name, entry) in old.commands.iter().chain(&plan.target.commands) {
+            if entry.repository.is_none()
+                && plan.target.commands.get(name) != old.commands.get(name)
             {
-                bail!("plan changes inactive Xcode imports");
+                bail!("plan changes command import `{name}`");
             }
-            for (name, entry) in &plan.target.xcode {
-                manifest::validate_name(name)?;
-                if config.enabled(active) && !config.selects(name) {
-                    bail!("unexpected Xcode skill in plan");
-                }
-                if let Some(snapshot) = plan.xcode_snapshots.get(name) {
-                    snapshot.verify(entry)?;
-                } else if old.xcode.get(name) != Some(entry) {
-                    bail!("plan missing Xcode snapshot for `{name}`");
-                }
-            }
-        } else if !plan.target.xcode.is_empty() || plan.target.xcode_all_complete {
-            bail!("unexpected Xcode metadata in plan");
         }
-        if plan
-            .xcode_snapshots
-            .keys()
-            .any(|name| !plan.target.xcode.contains_key(name))
-        {
-            bail!("unexpected Xcode snapshot in plan");
+        for (name, entry) in &old.commands {
+            if let Some(alias) = &entry.repository
+                && manifest
+                    .apps
+                    .get(alias)
+                    .is_some_and(|app| !app.enabled(active))
+                && plan.target.commands.get(name) != Some(entry)
+            {
+                bail!("plan changes inactive source `{alias}`");
+            }
+        }
+        for (name, entry) in &plan.target.commands {
+            let Some(alias) = &entry.repository else {
+                continue;
+            };
+            manifest::validate_name(name)?;
+            let app = manifest
+                .apps
+                .get(alias)
+                .context("unexpected app source in plan")?;
+            let kept = old.commands.get(name) == Some(entry);
+            if app.enabled(active)
+                && (!app.selects(name) || (entry.producer != app.producer && !kept))
+            {
+                bail!("unexpected app skill in plan");
+            }
+            if let Some(snapshot) = plan.app_snapshots.get(name) {
+                snapshot.verify(&entry.snapshot)?;
+            } else if old.commands.get(name) != Some(entry) {
+                bail!("plan missing app snapshot for `{name}`");
+            }
+        }
+        if plan.app_snapshots.keys().any(|name| {
+            !plan
+                .target
+                .commands
+                .get(name)
+                .is_some_and(|e| e.repository.is_some())
+        }) {
+            bail!("unexpected app snapshot in plan");
         }
 
-        if plan.target.version != old.version {
+        // Moving app snapshots into `[commands]` upgrades older locks.
+        if ![old.version, crate::lock::VERSION].contains(&plan.target.version) {
             bail!("invalid update plan lock metadata");
         }
         let mut expected = BTreeMap::new();
@@ -270,10 +311,10 @@ impl Plan {
         active: &Active,
         context: Context,
         names: Vec<String>,
-        artifact: (Lock, BTreeMap<String, crate::xcode::Snapshot>),
+        artifact: (Lock, BTreeMap<String, crate::export::Snapshot>),
         git: &Git,
     ) -> Result<()> {
-        let (target, xcode_snapshots) = artifact;
+        let (target, app_snapshots) = artifact;
         if context != Context::read(paths, active)? {
             bail!("manifest or lock changed while planning; generate a new plan");
         }
@@ -322,35 +363,31 @@ impl Plan {
                 };
             changes.insert(name.clone(), patch);
         }
-        for (name, snapshot) in &xcode_snapshots {
-            snapshot.verify(&target.xcode[name])?;
-            if let Some(entry) = old.xcode.get(name) {
-                crate::xcode::Snapshot::capture(&crate::xcode::skill_dir(paths, name, entry))?
-                    .verify(entry)?;
+        for (name, snapshot) in &app_snapshots {
+            let entry = &target.commands[name];
+            snapshot.verify(&entry.snapshot)?;
+            let previous = crate::export::member(&old, name);
+            if let Some(previous) = previous {
+                crate::export::Snapshot::capture(&crate::export::stored(paths, name, previous))?
+                    .verify(&previous.snapshot)?;
             }
-            if old.xcode.get(name) != target.xcode.get(name) {
-                let previous = old
-                    .xcode
-                    .get(name)
-                    .map(|entry| crate::xcode::skill_dir(paths, name, entry));
+            if previous != Some(entry) {
+                let previous = previous.map(|e| crate::export::stored(paths, name, e));
                 changes.insert(
-                    format!("xcode:{name}"),
+                    format!("app:{name}"),
                     snapshot.review(match &previous {
-                        Some(dir) if !dir.join("SKILL.md").is_file() => bail!("previous Xcode content for `{name}` is unavailable; cannot review its changes"),
+                        Some(dir) if !dir.join("SKILL.md").is_file() => bail!("previous app content for `{name}` is unavailable; cannot review its changes"),
                         value => value.as_deref(),
                     }, false)?,
                 );
             }
         }
-        for (name, entry) in &old.xcode {
-            if !target.xcode.contains_key(name) {
-                let previous = crate::xcode::skill_dir(paths, name, entry);
-                let snapshot = crate::xcode::Snapshot::capture(&previous)?;
-                snapshot.verify(entry)?;
-                changes.insert(
-                    format!("removed:xcode:{name}"),
-                    snapshot.review(None, true)?,
-                );
+        for (name, entry) in &old.commands {
+            if entry.repository.is_some() && !target.commands.contains_key(name) {
+                let previous = crate::export::stored(paths, name, entry);
+                let snapshot = crate::export::Snapshot::capture(&previous)?;
+                snapshot.verify(&entry.snapshot)?;
+                changes.insert(format!("removed:app:{name}"), snapshot.review(None, true)?);
             }
         }
         for (name, entry) in &old.skills {
@@ -374,11 +411,11 @@ impl Plan {
             }
         }
         let mut plan = Self {
-            version: 2,
+            version: 3,
             context,
             names,
             target,
-            xcode_snapshots,
+            app_snapshots,
             changes,
             checksum: String::new(),
         };

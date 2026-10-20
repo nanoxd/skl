@@ -87,18 +87,17 @@ pub fn run(
                     paths
                 )
                 .unwrap_or(false)),
-            "repository `{alias}` wildcard coverage is missing or stale; run `skl sync` before adopting"
+            "source `{alias}` wildcard coverage is missing or stale; run `skl sync` before adopting"
         );
     }
-    ensure!(
-        !manifest
-            .xcode
-            .as_ref()
-            .is_some_and(|config| config.skills.is_none() && !lock.xcode_all_complete),
-        "Xcode wildcard selection has no complete cached export; run `skl sync` before adopting"
-    );
+    for (alias, app) in &manifest.apps {
+        ensure!(
+            app.skills.is_some() || app.coverage(alias, &lock.repositories).is_some(),
+            "source `{alias}` wildcard coverage is missing or stale; run `skl sync` before adopting"
+        );
+    }
     crate::repositories::append(paths, &mut manifest, &lock.repositories)?;
-    crate::xcode::append_skills(paths, &mut manifest, &lock.xcode)?;
+    crate::export::append(paths, &mut manifest, &lock.commands, &Default::default())?;
     println!(
         "{}snapshot {} -> {}",
         if dry_run { "Would " } else { "Will " },

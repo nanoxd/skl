@@ -12,11 +12,18 @@ fn copy(source: &Path, dest: &Path) {
     }
 }
 fn main() {
-    let root = env::var_os("FAKE_XCODE").unwrap();
+    // skl passes only DEVELOPER_DIR through, so it locates the fake Xcode's data.
+    let root = env::var_os("DEVELOPER_DIR").unwrap();
     let root = Path::new(&root);
+    let args: Vec<_> = env::args().skip(1).collect();
+    if args == ["--find", "xcodebuild"] {
+        // A Mac with only the Command Line Tools has no xcodebuild.
+        if root.join("missing").exists() { eprintln!("xcrun: error: unable to find utility \"xcodebuild\""); std::process::exit(1); }
+        println!("{}", root.join("xcodebuild").display());
+        return;
+    }
     fs::write(root.join("called"), "yes").unwrap();
     if root.join("fail").exists() { eprintln!("Xcode setup incomplete"); std::process::exit(1); }
-    let args: Vec<_> = env::args().skip(1).collect();
     if args == ["xcodebuild", "-version"] {
         println!("{}", fs::read_to_string(root.join("version")).unwrap());
     } else {

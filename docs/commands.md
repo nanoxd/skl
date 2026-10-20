@@ -53,14 +53,17 @@ or absolute paths. `--only-profile` sets a skill's restrictions, while global
 `--profile` selects the profiles used by the ensuing sync.
 
 `configure <names...>` edits existing `[skills]` entries without fetching their
-sources to edit them. It syncs afterward unless `--no-sync` is supplied. Use
+sources to edit them. A skill selected by a declared source's list or cached
+wildcard membership gets a `source` override entry instead. It syncs
+afterward unless `--no-sync` is supplied. Use
 `--default-agents`, `--all-os`, or `--all-profiles` to remove an override and
 restore the corresponding default; each reset conflicts with its setting flag.
 Batch edits validate the whole resulting manifest before writing, preserve
 comments and unspecified fields, and fail without changing the manifest if any
 name is unknown or settings are invalid. Symlinked manifests remain symlinked.
 `add` leaves existing entries unchanged, even when settings flags are supplied;
-use `configure` to change those entries. These commands do not edit `[xcode]`.
+use `configure` to change those entries. `configure` and `remove` also work on
+members of app sources such as Xcode.
 
 `--profile <name>` works with every command and can be repeated.
 
@@ -69,16 +72,16 @@ skill that failed to fetch, or a missing link.
 
 `skl info <name>` inspects a configured skill or an existing entry in configured
 agent directories. It shows manifest source and ref, full pinned commit and
-subdirectory (including stale lock entries), local paths or cached Xcode provenance,
+subdirectory (including stale lock entries), local paths or cached app provenance,
 profile/OS selection reasons, and actual versus recorded link targets. A link is
 owned only when its target still matches the state file. Old recorded destinations
 are shown too, even after the configured agents change.
 
-`info` is read-only: it takes no run lock, fetches nothing, invokes no Xcode export,
+`info` is read-only: it takes no run lock, fetches nothing, runs no app export,
 and creates no files. Exit 0 means the skill was found and inspected, even if it is
 excluded, missing content, unlocked, or has conflicts. Unknown names, invalid
-arguments, and unreadable or malformed metadata exit non-zero. Xcode wildcard
-names become known after a successful sync; explicitly selected names can be
+arguments, and unreadable or malformed metadata exit non-zero. Names from
+wildcard sources become known after a successful sync; explicitly selected names can be
 inspected before export. Unmanaged entries can be inspected even without a manifest.
 
 `skl list` ends with a "Not managed by skl" section: every entry in each agent's

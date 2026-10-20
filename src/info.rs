@@ -8,12 +8,12 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use crate::{
-    git,
+    export, git,
     lock::Lock,
     manifest::{self, Origin},
     paths::Paths,
     profile::Active,
-    sync, xcode,
+    sync,
 };
 
 #[derive(Serialize)]
@@ -21,12 +21,12 @@ pub struct Report {
     pub name: String,
     pub manifest: PathBuf,
     pub origin: String,
+    /// A Git skill's source, or the declared source an app member came from.
     pub source: Option<String>,
     pub git_ref: Option<String>,
     pub subdir: Option<String>,
     pub locked: Option<crate::lock::LockedSkill>,
     pub lock_matches: bool,
-    pub xcode: Option<crate::lock::XcodeSkill>,
     pub command: Option<crate::lock::CommandSkill>,
     pub content_path: Option<PathBuf>,
     pub content_available: bool,
@@ -131,7 +131,7 @@ pub fn collect(paths: &Paths, active: &Active, name: &str) -> Result<Report> {
     let lock = Lock::load(&paths.lock())?;
     crate::repositories::append(paths, &mut manifest, &lock.repositories)?;
     let explicit = manifest.skills.iter().any(|s| s.name == name);
-    xcode::append_skills(paths, &mut manifest, &lock.xcode)?;
+    export::append(paths, &mut manifest, &lock.commands, &Default::default())?;
     let records = sync::owned_links(paths)?;
     collect_loaded(paths, active, name, &manifest, &lock, &records, explicit)
 }
@@ -154,7 +154,6 @@ pub(crate) fn collect_loaded(
         subdir: None,
         locked: None,
         lock_matches: false,
-        xcode: None,
         command: None,
         content_path: None,
         content_available: false,
@@ -188,12 +187,22 @@ pub(crate) fn collect_loaded(
         report.agents = skill.agents.iter().map(|a| a.id.clone()).collect();
         destinations.extend(skill.agents.iter().map(|a| a.dir.join(name)));
         if !explicit {
-            report.origin = "Xcode".into();
-            report.xcode = lock.xcode.get(name).cloned();
-            report.content_path = report
-                .xcode
+            report.origin = "app".into();
+            report.command = export::member(lock, name).cloned();
+            // The lock knows the exporting source; otherwise use the selection.
+            report.source = report
+                .command
                 .as_ref()
-                .map(|e| xcode::skill_dir(paths, name, e));
+                .and_then(|e| e.repository.clone())
+                .or_else(|| {
+                    let mut apps = manifest.apps.iter();
+                    apps.find(|(_, app)| app.selects(name))
+                        .map(|(alias, _)| alias.clone())
+                });
+            report.content_path = report
+                .command
+                .as_ref()
+                .map(|e| export::stored(paths, name, e));
         } else {
             match &skill.origin {
                 Origin::Local(dir) | Origin::OptionalLocal(dir) => {
@@ -263,7 +272,7 @@ pub(crate) fn collect_loaded(
     }
     if report.origin == "unmanaged" && report.links.is_empty() {
         bail!(
-            "unknown skill `{name}`: not configured or found in configured agent directories (Xcode wildcard names require a prior sync)"
+            "unknown skill `{name}`: not configured or found in configured agent directories (wildcard source names require a prior sync)"
         );
     }
     report.content_available = report
@@ -282,8 +291,11 @@ impl Report {
             paths.tilde(&self.manifest)
         );
         if let Some(source) = &self.source {
+            println!("Source: {source}");
+        }
+        if self.origin == "git" {
             println!(
-                "Source: {source}\nRef: {}\nSubdirectory: {}",
+                "Ref: {}\nSubdirectory: {}",
                 self.git_ref.as_deref().unwrap_or("default branch"),
                 self.subdir.as_deref().unwrap_or("auto-discover")
             );
@@ -311,19 +323,12 @@ impl Report {
         if let Some(entry) = &self.command {
             println!(
                 "App version: {}\nContent digest: {}",
-                entry.snapshot.version, entry.snapshot.digest
+                entry.snapshot.version.replace('\n', " / "),
+                entry.snapshot.digest
             );
         }
-        if self.origin == "Xcode" {
-            if let Some(entry) = &self.xcode {
-                println!(
-                    "Xcode version: {}\nContent digest: {}",
-                    entry.version.replace('\n', " / "),
-                    entry.digest
-                );
-            } else {
-                println!("Xcode: not exported");
-            }
+        if self.origin == "app" && self.command.is_none() {
+            println!("App export: not exported");
         }
         if let Some(path) = &self.content_path {
             println!(
