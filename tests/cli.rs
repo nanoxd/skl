@@ -1354,6 +1354,15 @@ fn release_rejects_missing_or_empty_notes() {
 }
 
 #[test]
+fn release_tag_must_match_the_package_version() {
+    assert!(release_changelog::check_version("v0.4.0", "0.4.0").is_ok());
+    assert!(release_changelog::check_version("v0.4.0-rc.1", "0.4.0-rc.1").is_ok());
+    for tag in ["v0.3.0", "0.4.0", "v0.4.0-rc.1", "v0.4"] {
+        assert!(release_changelog::check_version(tag, "0.4.0").is_err());
+    }
+}
+
+#[test]
 fn release_saves_to_advanced_branch_and_reruns_without_duplicate_commits() {
     let tmp = TempDir::new().unwrap();
     let remote = tmp.path().join("remote.git");

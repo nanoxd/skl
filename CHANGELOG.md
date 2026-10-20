@@ -53,6 +53,11 @@ All notable changes to this project are documented here.
   name appears once. Resetting the last override returns it to the list or the
   wildcard.
 
+### Fixed
+
+- `skl --version` reports the release version. The 0.3.0 binaries reported 0.2.0,
+  and a release now fails when its tag doesn't match the version in `Cargo.toml`.
+
 ## [0.3.0] - 2026-10-18
 
 ### Added
