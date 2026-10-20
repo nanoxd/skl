@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-20
+
 ### Added
 
 - App sources: `[sources.<alias>]` with a `command` that exports several skills
