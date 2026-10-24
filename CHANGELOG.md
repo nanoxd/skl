@@ -4,6 +4,12 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- Xcode and other app exports no longer intermittently fail with `No such file or
+  directory (os error 2)` when temporary files disappear during a live export scan.
+  Completed exports still undergo strict validation before installation.
+
 ## [0.4.0] - 2026-10-20
 
 ### Added

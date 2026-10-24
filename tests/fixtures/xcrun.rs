@@ -29,6 +29,18 @@ fn main() {
     } else {
         assert_eq!(&args[..3], &["agent", "skills", "export"]);
         assert_eq!(args.len(), 4);
+        if root.join("temporary-files").exists() {
+            // Exporters may create and remove scratch files beneath TMPDIR.
+            let scratch = std::env::temp_dir().join("scratch");
+            let start = std::time::Instant::now();
+            while start.elapsed() < std::time::Duration::from_secs(1) {
+                fs::create_dir(&scratch).unwrap();
+                for i in 0..128 {
+                    fs::write(scratch.join(i.to_string()), b"temporary").unwrap();
+                }
+                fs::remove_dir_all(&scratch).unwrap();
+            }
+        }
         copy(&root.join("export"), Path::new(&args[3]));
     }
 }
