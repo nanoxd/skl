@@ -48,7 +48,10 @@ impl Paths {
             "project {} is not a directory",
             root.display()
         );
-        let key = format!("{:x}", Sha256::digest(root.as_os_str().as_encoded_bytes()));
+        let key = Sha256::digest(root.as_os_str().as_encoded_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
         paths.config = root.clone();
         paths.data = paths.data.join("projects").join(key);
         paths.project = Some(root);

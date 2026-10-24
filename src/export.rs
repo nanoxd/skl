@@ -386,7 +386,11 @@ fn discover(dir: &Path, found: &mut BTreeMap<String, PathBuf>) -> Result<()> {
 pub fn content_digest(root: &Path) -> Result<String> {
     let mut hash = Sha256::new();
     hash_tree(root, root, &mut hash)?;
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(hash
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 fn hash_tree(root: &Path, dir: &Path, hash: &mut Sha256) -> Result<()> {
