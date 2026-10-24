@@ -941,6 +941,23 @@ impl Env {
 }
 
 #[test]
+fn xcode_refresh_tolerates_disappearing_temporary_files() {
+    let env = Env::new();
+    env.write_manifest("[xcode]\nskills = '*'\nos = ['macos', 'linux']\n");
+    env.export_xcode(&[("alpha", "v1")], "Xcode 27");
+    assert!(env.xcode(&["sync"]).status.success());
+
+    env.write_manifest("[xcode]\nskills = ['alpha']\nos = ['macos', 'linux']\n");
+    env.export_xcode(&[("alpha", "v2")], "Xcode 28");
+    fs::write(env.remotes.join("temporary-files"), "").unwrap();
+    let out = env.xcode(&["sync"]);
+    assert!(out.status.success(), "{out:?}");
+    assert!(body(&env.codex("alpha")).contains("v2"));
+    assert!(body(&env.claude("alpha")).contains("v2"));
+    assert!(env.xcode(&["sync", "--locked"]).status.success());
+}
+
+#[test]
 fn xcode_all_refreshes_and_records_provenance() {
     let env = Env::new();
     env.write_manifest("[xcode]\nos = ['macos', 'linux']\nskills = '*'\n");

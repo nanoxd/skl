@@ -99,30 +99,49 @@ fn drain(pipe: &mut impl Read, bytes: &mut Vec<u8>) -> Result<bool> {
     Ok(false)
 }
 
-fn tree_limit(root: &Path) -> Result<()> {
-    fn visit(dir: &Path, size: &mut u64, count: &mut usize, depth: usize) -> Result<()> {
+fn tree_limit(root: &Path, live: bool) -> Result<()> {
+    fn visit(
+        dir: &Path,
+        size: &mut u64,
+        count: &mut usize,
+        depth: usize,
+        live: bool,
+    ) -> Result<()> {
         if depth > 64 {
             bail!("command export is too deeply nested");
         }
-        for entry in fs::read_dir(dir)? {
-            let path = entry?.path();
-            let meta = fs::symlink_metadata(&path)?;
+        // A running exporter can remove scratch files between enumeration and
+        // inspection. Only the live scan tolerates that race; final checks don't.
+        let entries = match fs::read_dir(dir) {
+            Err(err) if live && err.kind() == ErrorKind::NotFound => return Ok(()),
+            result => {
+                result.with_context(|| format!("reading command export {}", dir.display()))?
+            }
+        };
+        for entry in entries {
+            let path = match entry {
+                Err(err) if live && err.kind() == ErrorKind::NotFound => continue,
+                result => result?.path(),
+            };
+            let meta = match fs::symlink_metadata(&path) {
+                Err(err) if live && err.kind() == ErrorKind::NotFound => continue,
+                result => result
+                    .with_context(|| format!("inspecting command export {}", path.display()))?,
+            };
             *count += 1;
             *size += meta.len();
             if *count > 4096 || *size > TREE_LIMIT {
                 bail!("command export exceeds 32 MiB or 4096 entries");
             }
             if meta.is_dir() {
-                visit(&path, size, count, depth + 1)?;
+                visit(&path, size, count, depth + 1, live)?;
             } else if !meta.is_file() {
                 bail!("command export contains a symlink or special file");
             }
         }
         Ok(())
     }
-    if root.exists() {
-        visit(root, &mut 0, &mut 0, 0)?;
-    }
+    visit(root, &mut 0, &mut 0, 0, live)?;
     Ok(())
 }
 
@@ -175,7 +194,7 @@ fn run(
         }
         let out_done = drain(&mut stdout, &mut output)?;
         let err_done = drain(&mut stderr, &mut errors)?;
-        tree_limit(cwd)?;
+        tree_limit(cwd, true)?;
         if let Some(status) = process.0.try_wait()? {
             if !status.success() {
                 bail!(
@@ -184,6 +203,7 @@ fn run(
                 );
             }
             if out_done && err_done {
+                tree_limit(cwd, false)?;
                 return Ok(output);
             }
         }
@@ -220,7 +240,7 @@ pub fn export(origin: &CommandOrigin, cwd: &Path, dest: &Path, environment: &[&s
         origin.timeout,
         environment,
     )?;
-    tree_limit(cwd)
+    tree_limit(cwd, false)
 }
 
 /// The trimmed output of the optional version probe, recorded as provenance.
@@ -268,7 +288,7 @@ pub fn import(origin: &CommandOrigin) -> Result<Option<(CommandSkill, Snapshot)>
     {
         bail!("command must produce a directory with a regular-file SKILL.md");
     }
-    tree_limit(&dest)?;
+    tree_limit(&dest, false)?;
     let skill = dest.join("SKILL.md");
     let text = fs::read_to_string(&skill)?;
     if text.trim().is_empty() || text.contains('\0') {
