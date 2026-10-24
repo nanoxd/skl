@@ -141,10 +141,10 @@ impl Plan {
             changes: &self.changes,
             app_snapshots: &self.app_snapshots,
         };
-        Ok(format!(
-            "{:x}",
-            Sha256::digest(toml::to_string(&payload)?.as_bytes())
-        ))
+        Ok(Sha256::digest(toml::to_string(&payload)?.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect())
     }
 
     pub fn load(file: &Path, paths: &Paths, active: &Active) -> Result<Self> {

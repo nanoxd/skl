@@ -3702,6 +3702,31 @@ fn repository_alias_only_supports_saved_plans_and_rejects_invalid_options() {
 mod release_homebrew;
 
 #[test]
+fn homebrew_checksums_preserve_standard_sha256_encoding() {
+    let tmp = TempDir::new().unwrap();
+    // SHA-256("abc"), independent of the dependency used by the implementation.
+    // Includes single-digit bytes to catch missing zero padding.
+    let hash = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    for target in [
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-gnu",
+    ] {
+        let archive = format!("skl-{target}.tar.gz");
+        fs::write(tmp.path().join(&archive), b"abc").unwrap();
+        fs::write(
+            tmp.path().join(format!("{archive}.sha256")),
+            format!("{hash}  {archive}\n"),
+        )
+        .unwrap();
+    }
+    let updated =
+        release_homebrew::update(include_str!("../Formula/skl.rb"), "v99.0.0", tmp.path()).unwrap();
+    assert_eq!(updated.matches(&format!("sha256 \"{hash}\"")).count(), 4);
+}
+
+#[test]
 fn homebrew_release_updates_all_archives_and_preserves_formula_test() {
     use sha2::{Digest, Sha256};
     let tmp = TempDir::new().unwrap();
@@ -3715,7 +3740,10 @@ fn homebrew_release_updates_all_archives_and_preserves_formula_test() {
     for target in targets {
         let archive = format!("skl-{target}.tar.gz");
         fs::write(tmp.path().join(&archive), target).unwrap();
-        let hash = format!("{:x}", Sha256::digest(target.as_bytes()));
+        let hash = Sha256::digest(target.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
         fs::write(
             tmp.path().join(format!("{archive}.sha256")),
             format!("{hash}  {archive}\n"),
@@ -3725,7 +3753,10 @@ fn homebrew_release_updates_all_archives_and_preserves_formula_test() {
     let updated = release_homebrew::update(original, "v99.0.0", tmp.path()).unwrap();
     assert_eq!(updated.matches("/v99.0.0/").count(), 4);
     for target in targets {
-        let hash = format!("{:x}", Sha256::digest(target.as_bytes()));
+        let hash = Sha256::digest(target.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
         assert!(updated.contains(&format!("sha256 \"{hash}\"")));
     }
     assert_eq!(
@@ -3759,7 +3790,10 @@ fn homebrew_release_updates_all_archives_and_preserves_formula_test() {
     let path = tmp.path().join(archive);
     fs::write(&path, "corrupt").unwrap();
     assert!(release_homebrew::update(original, "v99.0.0", tmp.path()).is_err());
-    let hash = format!("{:x}", Sha256::digest(b"corrupt"));
+    let hash = Sha256::digest(b"corrupt")
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     fs::write(
         tmp.path().join(format!("{archive}.sha256")),
         format!("{hash}  wrong.tar.gz\n"),

@@ -75,7 +75,10 @@ pub fn update(formula: &str, tag: &str, dist: &Path) -> Result<String> {
     for (index, archive) in replacements {
         let path = dist.join(&archive);
         let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-        let hash = format!("{:x}", Sha256::digest(&bytes));
+        let hash = Sha256::digest(&bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
         let sidecar = dist.join(format!("{archive}.sha256"));
         let checksum = std::fs::read_to_string(&sidecar)
             .with_context(|| format!("reading {}", sidecar.display()))?;

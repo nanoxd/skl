@@ -27,16 +27,16 @@ required-features = ["maintainer-tools"]
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
-libc = "0.2.190"
-ureq = { version = "~3.4.2", default-features = false, features = ["rustls"] }
+libc = "0.2.191"
+ureq = { version = "~3.5.0", default-features = false, features = ["rustls"] }
 serde_json = "1"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.8"
 toml_edit = "0.25.17"
 
-sha2 = "0.10"
+sha2 = "0.11.1"
 tempfile = "3.27.0"
-clap_complete = "4.6.5"
+clap_complete = "4.6.11"
 
 [profile.release]
 lto = true
