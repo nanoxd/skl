@@ -197,7 +197,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Inspect one skill without changing files or contacting its source
+    /// Inspect one skill or plugin without changing files or contacting its source
     Info {
         name: String,
         /// Emit one versioned JSON document
@@ -555,7 +555,11 @@ fn run(cli: Cli) -> Result<bool> {
         Command::List { json: false } => list(&paths, &active()?),
         Command::Info { name, json: true } => json::info(&paths, &active()?, &name),
         Command::Info { name, json: false } => {
-            info::collect(&paths, &active()?, &name)?.print(&paths);
+            let active = active()?;
+            match info::plugin(&paths, &active, &name)? {
+                Some(report) => report.print(&paths),
+                None => info::collect(&paths, &active, &name)?.print(&paths),
+            }
             Ok(true)
         }
         Command::Verify { names, json } => verify::run(&paths, &active()?, &names, json),
@@ -1461,23 +1465,31 @@ fn list(paths: &Paths, active: &Active) -> Result<bool> {
                         .map_or(commit.to_string(), |r| format!("{r} {commit}"))
                 },
             );
+            let report = plugins::report(paths, active, plugin, &lock, &installed)?;
             let status = if !manifest::matches_os(&plugin.os) {
                 format!("  (only on {})", plugin.os.join(", "))
             } else if !active.includes(&plugin.profiles) {
                 format!("  (only for {})", plugin.profiles.join(", "))
             } else {
                 let mut notes = Vec::new();
-                let mut missing = Vec::new();
-                for harness in &plugin.agents {
-                    if !harness.available()? {
-                        notes.push(harness.absence());
-                    } else if installed.get(harness.id(), &plugin.name).is_none() {
-                        missing.push(harness.id());
-                    }
-                }
+                let missing: Vec<&str> = report
+                    .agents
+                    .iter()
+                    .filter(|a| a.status.needs_sync() && a.status != plugins::InstallStatus::Stale)
+                    .map(|a| a.agent.as_str())
+                    .collect();
                 if !missing.is_empty() {
                     healthy = false;
-                    notes.insert(0, format!("not installed for {}", missing.join(", ")));
+                    notes.push(format!("not installed for {}", missing.join(", ")));
+                }
+                for agent in &report.agents {
+                    if agent.status == plugins::InstallStatus::Unavailable {
+                        notes.push(
+                            plugins::Harness::named(&agent.agent)
+                                .map(plugins::Harness::absence)
+                                .unwrap_or_default(),
+                        );
+                    }
                 }
                 if notes.is_empty() {
                     String::new()

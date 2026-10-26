@@ -6601,10 +6601,15 @@ fn plugin_install_failures_and_missing_harnesses_keep_what_worked() {
 }
 
 trait Text {
+    fn stdout_text(&self) -> String;
     fn stderr_text(&self) -> String;
 }
 
 impl Text for Output {
+    fn stdout_text(&self) -> String {
+        String::from_utf8_lossy(&self.stdout).into_owned()
+    }
+
     fn stderr_text(&self) -> String {
         String::from_utf8_lossy(&self.stderr).into_owned()
     }
@@ -6617,6 +6622,80 @@ fn change_plugin(env: &Env, text: &str) {
         fs::write(remote.join(dir).join("agents/poteto-agent.md"), text).unwrap();
     }
     commit(&remote, text);
+}
+
+#[test]
+fn plugin_inspection_reports_installs_links_and_drift() {
+    let env = Env::new();
+    let url = plugins_repo(&env);
+    env.write_manifest(&format!("[plugins.pstack]\nsource = '{url}'\n"));
+    env.harness_ok(&["sync"]);
+
+    let info = env.harness_ok(&["info", "pstack"]);
+    for line in [
+        "Plugin: pstack",
+        "Lock: matches manifest",
+        "Agent claude-code: installed (owned) as pstack@skl",
+        "Agent codex: installed (owned) as pstack@skl",
+        "  Folder: harness/pstack/claude-code",
+    ] {
+        assert!(info.contains(line), "{line}\n{info}");
+    }
+    let json: serde_json::Value =
+        serde_json::from_str(&env.harness_ok(&["info", "pstack", "--json"])).unwrap();
+    assert_eq!(json["data"]["origin"], "plugin");
+    assert_eq!(json["data"]["agents"][0]["status"], "installed");
+    assert!(
+        json["data"]["agents"][0]["content_path"]
+            .as_str()
+            .unwrap()
+            .starts_with('/')
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&env.harness_ok(&["list", "--json"])).unwrap();
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["data"]["plugins"][0]["name"], "pstack");
+    assert!(env.harness_ok(&["doctor"]).contains("No problems found"));
+    // Both agents read the same folder, so it is checked once.
+    let out = env.harness_ok(&["verify"]);
+    assert!(
+        out.contains("verified: pstack [claude-code, codex]"),
+        "{out}"
+    );
+
+    // Drift in the store, and a missing marketplace link, are reported.
+    let store = PathBuf::from(
+        json["data"]["plugins"][0]["agents"][0]["content_path"]
+            .as_str()
+            .unwrap(),
+    );
+    fs::write(store.join("agents/poteto-agent.md"), "tampered").unwrap();
+    let out = env.harness(&["verify", "--json"]);
+    assert!(!out.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["diagnostics"][0]["code"], "content-drift");
+    assert_eq!(json["data"]["skills"][0]["agents"][0], "claude-code");
+    fs::write(store.join("agents/poteto-agent.md"), "agent").unwrap();
+    fs::remove_file(env.marketplace_link("claude-code", "pstack")).unwrap();
+    let out = env.harness(&["doctor"]);
+    assert!(!out.status.success());
+    assert!(
+        out.stdout_text().contains("missing-link: pstack"),
+        "{}",
+        out.stdout_text()
+    );
+    env.harness_ok(&["sync"]);
+
+    // Narrowing the agents leaves a recorded install to remove.
+    env.write_manifest(&format!(
+        "[plugins.pstack]\nsource = '{url}'\nagents = ['claude-code']\n"
+    ));
+    let doctor = env.harness(&["doctor"]).stdout_text();
+    assert!(doctor.contains("stale-plugin: pstack"), "{doctor}");
+    assert!(
+        env.harness_ok(&["info", "pstack"])
+            .contains("Agent codex: installed but no longer selected (owned)")
+    );
 }
 
 #[test]

@@ -30,6 +30,10 @@ All notable changes to this project are documented here.
 - Saved update plans cover plugins: `update --plan` pins each plugin's commit and
   includes the full diff of every folder an agent installs, without running an
   agent CLI. A plan with plugins is version 4, so an older skl refuses it.
+- `info`, `list`, `doctor`, and `verify`, with or without `--json`, cover plugins:
+  the pinned commit, each agent's folder, store copy, and install, plugins that
+  aren't installed or are out of date, missing marketplace links, installs left
+  after an agent is dropped, and store drift. None of them run an agent CLI.
 
 ### Changed
 

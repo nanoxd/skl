@@ -128,6 +128,7 @@ pub fn collect(paths: &Paths, active: &Active) -> Result<Vec<Diagnostic>> {
         .skills
         .iter()
         .any(|s| s.enabled(active) && matches!(s.origin, Origin::Git(_)))
+        || manifest.plugins.iter().any(|p| p.enabled(active))
     {
         for tool in ["git", "tar"] {
             if !available(tool) {
@@ -232,6 +233,7 @@ pub fn collect(paths: &Paths, active: &Active) -> Result<Vec<Diagnostic>> {
     for (path, (target, name)) in &expected {
         check_link(&mut out, path, target, recorded.get(path), Some(name));
     }
+    plugins(paths, active, &manifest, &lock, &mut out)?;
     for (path, target) in &recorded {
         if expected.contains_key(path) {
             continue;
@@ -249,6 +251,112 @@ pub fn collect(paths: &Paths, active: &Active) -> Result<Vec<Diagnostic>> {
         check_link(&mut out, path, target, Some(target), None);
     }
     Ok(out)
+}
+
+/// Plugin lock entries, store folders, and what skl recorded installing in each agent.
+fn plugins(
+    paths: &Paths,
+    active: &Active,
+    manifest: &manifest::Manifest,
+    lock: &Lock,
+    out: &mut Vec<Diagnostic>,
+) -> Result<()> {
+    use crate::plugins::InstallStatus;
+    let state = crate::plugins::State::load(paths).context(
+        "check plugins/state.toml; restore a valid state file before running doctor again",
+    )?;
+    for name in lock.plugins.keys() {
+        if !manifest.plugins.iter().any(|p| &p.name == name) {
+            issue(
+                out,
+                "stale-lock",
+                Some(name),
+                Some(paths.lock()),
+                "plugin lock entry is no longer in the manifest".into(),
+                "Run skl sync to reconcile the lockfile.",
+            );
+        }
+    }
+    for record in &state.installed {
+        if !manifest.plugins.iter().any(|p| p.name == record.name) {
+            issue(
+                out,
+                "stale-plugin",
+                Some(&record.name),
+                Some(crate::plugins::State::path(paths)),
+                format!(
+                    "{} is installed in {} but no longer in the manifest",
+                    record.id, record.agent
+                ),
+                "Run skl sync to uninstall plugins skl installed.",
+            );
+        }
+    }
+    for plugin in &manifest.plugins {
+        let report = crate::plugins::report(paths, active, plugin, lock, &state)?;
+        if report.enabled && !report.lock_matches {
+            issue(
+                out,
+                "not-locked",
+                Some(&plugin.name),
+                Some(paths.lock()),
+                "no matching plugin lock entry".into(),
+                "Run skl sync to resolve the manifest and update the lockfile.",
+            );
+        }
+        for agent in &report.agents {
+            let (code, message, remedy) = match agent.status {
+                InstallStatus::Unavailable | InstallStatus::Disabled => continue,
+                InstallStatus::NotInstalled => (
+                    "plugin-not-installed",
+                    format!("not installed in {}", agent.agent),
+                    "Run skl sync to install plugins.",
+                ),
+                InstallStatus::Outdated => (
+                    "outdated-plugin",
+                    format!("{} has an older commit or folder installed", agent.agent),
+                    "Run skl sync to update plugins.",
+                ),
+                InstallStatus::Stale => (
+                    "stale-plugin",
+                    format!("installed in {} but no longer selected", agent.agent),
+                    "Run skl sync to uninstall plugins skl installed.",
+                ),
+                InstallStatus::Installed => ("", String::new(), ""),
+            };
+            if !code.is_empty() {
+                issue(
+                    out,
+                    code,
+                    Some(&plugin.name),
+                    agent.install_path.clone(),
+                    message,
+                    remedy,
+                );
+            }
+            if let Some(path) = agent
+                .content_path
+                .as_ref()
+                .filter(|_| !agent.content_available)
+            {
+                issue(
+                    out,
+                    "invalid-cache",
+                    Some(&plugin.name),
+                    Some(path.clone()),
+                    format!("the store has no plugin {} reads", agent.agent),
+                    "Move the plugin's store directory aside and run skl sync to unpack it again.",
+                );
+            }
+            // Claude Code and Codex load skl's plugins through its marketplace links.
+            if matches!(agent.status, InstallStatus::Installed)
+                && let (Some(link), Some(target)) = (&agent.install_path, &agent.recorded_target)
+            {
+                check_link(out, link, target, Some(target), Some(&plugin.name));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn check_link(

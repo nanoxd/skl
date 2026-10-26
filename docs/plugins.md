@@ -11,7 +11,7 @@ on. Installing only a plugin's skills leaves the rest behind, and a skill that
 hands work to the plugin's agent then can't find it. skl installs the whole plugin
 in Claude Code and Codex, pinned to a commit in `skills.lock` like any skill.
 
-[Adding a plugin](#adding-a-plugin) · [How it works](#how-it-works) · [One plugin, several copies](#one-plugin-several-copies) · [Ownership and safety](#ownership-and-safety)
+[Adding a plugin](#adding-a-plugin) · [How it works](#how-it-works) · [One plugin, several copies](#one-plugin-several-copies) · [Inspecting plugins](#inspecting-plugins) · [Ownership and safety](#ownership-and-safety)
 
 ## Adding a plugin
 
@@ -93,6 +93,20 @@ subdir = { codex = "harness/pstack/codex" }
 
 The lock records the commit once and the folder each agent installs. Changing a
 folder installs that agent's copy at the same commit.
+
+## Inspecting plugins
+
+`skl list` shows each plugin's commit and any agent it isn't installed in yet.
+`skl info pstack` shows the pinned commit, each agent's folder and store copy, and
+what skl recorded installing. `skl doctor` reports plugins that aren't installed
+or are out of date, missing marketplace links, and installs left over after an
+agent was dropped. `skl verify pstack` compares each store folder with the locked
+commit. Codex keeps its own copy
+where skl can't see it, so verify checks the store folder Codex installed from.
+
+None of these run an agent's CLI. They read the manifest, the lock, and
+`plugins/state.toml`, so they show what skl installed, not what an agent has
+loaded.
 
 ## Ownership and safety
 

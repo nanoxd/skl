@@ -124,6 +124,25 @@ fn inspect(
     })
 }
 
+/// The report for a plugin entry, which `info` shows before any skill of that name,
+/// as `update` and `remove` also take a plugin name first.
+pub fn plugin(
+    paths: &Paths,
+    active: &Active,
+    name: &str,
+) -> Result<Option<crate::plugins::Report>> {
+    if !paths.manifest().try_exists()? {
+        return Ok(None);
+    }
+    let manifest = manifest::load(paths)?;
+    let Some(plugin) = manifest.plugins.iter().find(|p| p.name == name) else {
+        return Ok(None);
+    };
+    let lock = Lock::load(&paths.lock())?;
+    let state = crate::plugins::State::load(paths)?;
+    crate::plugins::report(paths, active, plugin, &lock, &state).map(Some)
+}
+
 pub fn collect(paths: &Paths, active: &Active, name: &str) -> Result<Report> {
     manifest::validate_name(name)?;
     let mut manifest = if paths.manifest().try_exists()? {
