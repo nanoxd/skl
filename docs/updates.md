@@ -67,7 +67,7 @@ available and intact to review changes or removals; otherwise planning fails.
 Disabled sources and unrelated selected updates do not invoke the exporter.
 Local skill content is not snapshotted. Plans reject command imports and app
 sources with their own `command`, since an arbitrary command cannot promise
-a side-effect-free preview.
+a side-effect-free preview. They don't cover [plugins](plugins.md) yet.
 
 Plans now use format version 3. Regenerate older plans; incompatible versions are
 rejected explicitly. Xcode payloads can make plans substantially larger than Git

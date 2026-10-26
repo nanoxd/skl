@@ -43,3 +43,7 @@ skill-creator = { source = "anthropics/skills", subdir = "skills/skill-creator" 
 # subdir = "harness/pstack/claude-code/skills"
 # skills = "*"
 # exclude = ["teach"]
+
+# A whole Claude Code or Codex plugin, with its agents, commands and hooks.
+# [plugins.pstack]
+# source = "cursor/plugins"

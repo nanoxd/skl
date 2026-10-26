@@ -1,5 +1,5 @@
 //! Claude Code and Cursor plugins keep skills next to agents, commands and hooks.
-//! skl installs only the skills, so `discover` points out the rest.
+//! skl installs only the skills, so `add` and `discover` point out the rest.
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -15,6 +15,8 @@ pub struct Plugin {
     pub agents: Vec<String>,
     pub commands: bool,
     pub hooks: bool,
+    /// The repository marketplace that lists this plugin, by its name.
+    pub marketplace: Option<String>,
 }
 
 impl Plugin {
@@ -39,6 +41,40 @@ impl Plugin {
             Some((last, [])) => last.clone(),
             Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
             None => String::new(),
+        }
+    }
+
+    /// Tells the user that the plugin's agents, commands or hooks stay behind, and
+    /// how to install the whole plugin instead.
+    pub fn warn(&self, source: &str) {
+        let at = if self.root.is_empty() {
+            "."
+        } else {
+            &self.root
+        };
+        eprintln!(
+            "warning: plugin `{}` ({at}) also ships {}, which installing its skills alone leaves out. Skills that hand work to them won't find them.",
+            self.name,
+            self.extras()
+        );
+        eprintln!(
+            "  Install the whole plugin instead: {}",
+            self.command(source)
+        );
+    }
+
+    /// The `skl add` command that installs this plugin.
+    pub fn command(&self, source: &str) -> String {
+        match &self.marketplace {
+            Some(_) => format!("skl add {source} --plugin {}", self.name),
+            None => {
+                let at = if self.root.is_empty() {
+                    "."
+                } else {
+                    &self.root
+                };
+                format!("skl add {source} --plugin {} --subdir {at}", self.name)
+            }
         }
     }
 }
@@ -70,6 +106,7 @@ pub fn containing(
             };
         }
     }
+    let marketplace = read_json(git, repo, commit, &set, ".claude-plugin/marketplace.json");
     roots
         .into_iter()
         .map(|root| {
@@ -89,10 +126,23 @@ pub fn containing(
                 .map(str::to_owned)
                 .collect();
             let commands = inside("commands");
+            let listed = marketplace.as_ref().and_then(|m| {
+                let entries = m.get("plugins")?.as_array()?;
+                entries
+                    .iter()
+                    .any(|p| {
+                        p.get("name").and_then(|n| n.as_str()) == Some(name.as_str())
+                            && p.get("source").and_then(|s| s.as_str()).is_some_and(|s| {
+                                s.trim_start_matches("./").trim_end_matches('/') == root
+                            })
+                    })
+                    .then(|| m.get("name")?.as_str().map(str::to_owned))?
+            });
             Plugin {
                 agents,
                 commands: files.iter().any(|f| f.starts_with(&commands)),
                 hooks: set.contains(join(&root, "hooks/hooks.json").as_str()),
+                marketplace: listed,
                 name,
                 root,
             }

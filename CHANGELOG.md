@@ -16,6 +16,17 @@ All notable changes to this project are documented here.
   named after its plugin or folder or `--alias NAME`, and excludes names the
   manifest already has. `discover` names the plugin the skills belong to and what
   else it ships.
+- Plugins: `[plugins.<name>]` installs a whole Claude Code or Codex plugin, with
+  its agents, commands, hooks, and MCP servers. skl pins it in the lock, unpacks it
+  into the store, and installs it through each agent's own plugin CLI from a
+  marketplace skl generates. Updates, `--locked`, dry runs, and removal work as
+  they do for skills, and skl only updates or uninstalls the installs it recorded.
+  `subdir` picks each agent's copy when a repository ships one per agent.
+  `skl add owner/repo --plugin NAME` writes the entry. A plugin can't share its
+  name with a skill. A lock with plugins is version 4.
+- `add` warns when the skills it installs come from a plugin that also ships
+  agents, commands, or hooks, and prints the `skl add --plugin` command that
+  installs the whole plugin.
 
 ### Changed
 

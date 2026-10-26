@@ -13,6 +13,7 @@ mod manifest;
 mod paths;
 mod plan;
 mod plugin;
+mod plugins;
 mod profile;
 mod repositories;
 mod search;
@@ -131,7 +132,10 @@ enum Command {
         /// Directory containing the skill, or a collection of skills, within the repository
         #[arg(long)]
         subdir: Option<String>,
-        /// Manifest name for the source `--all` declares for a collection
+        /// Install this plugin, with its agents, commands and hooks, instead of skills
+        #[arg(long, value_name = "NAME", conflicts_with_all = ["skills", "all", "interactive"])]
+        plugin: Option<String>,
+        /// Manifest name for `--plugin`, or for the source `--all` declares for a collection
         #[arg(long, value_name = "NAME")]
         alias: Option<String>,
         /// Only edit the manifest
@@ -472,10 +476,19 @@ fn run(cli: Cli) -> Result<bool> {
             all,
             git_ref,
             subdir,
+            plugin,
             alias,
             no_sync,
         } => {
             let source = source::Source::parse(&source, git_ref.as_deref(), subdir.as_deref())?;
+            if let Some(plugin) = plugin {
+                add_plugin(&paths, &source, &plugin, alias.as_deref(), &options)?;
+                return if no_sync {
+                    Ok(true)
+                } else {
+                    sync::run(&paths, &active()?, &sync::Options::default())
+                };
+            }
             let mut selected_collection = false;
             let _interactive_guard = if interactive {
                 selected_collection =
@@ -675,6 +688,7 @@ fn add(
         None
     };
     let source = declared.unwrap_or(source);
+    let mut plugins = Vec::new();
     let entries: Vec<(String, Entry)> = if local.is_dir() && declared.is_none() {
         if git_ref.is_some() || subdir.is_some() {
             bail!("--ref and --subdir do not apply to local directories");
@@ -837,11 +851,13 @@ fn add(
         }
         let files = git.files(&repo, &commit)?;
         let dirs: Vec<&str> = chosen.iter().flatten().map(|c| c.subdir.as_str()).collect();
+        plugins = plugin::containing(&git, &repo, &commit, &files, &dirs);
         // A collection inside one plugin takes the plugin's name.
-        let plugin_name = match plugin::containing(&git, &repo, &commit, &files, &dirs).as_slice() {
+        let plugin_name = match plugins.as_slice() {
             [only] => Some(only.name.clone()),
             _ => None,
         };
+        plugins.retain(plugin::Plugin::has_more);
         // `--all` on a collection declares one source that keeps tracking it.
         if let (true, true, None, Some(dir)) = (all, collection, group, subdir) {
             add_source(
@@ -854,6 +870,9 @@ fn add(
                 options,
                 alias.or(plugin_name.as_deref()),
             )?;
+            for plugin in &plugins {
+                plugin.warn(source);
+            }
             return Ok(());
         }
         // A member found by name elsewhere in its source keeps its directory.
@@ -920,7 +939,7 @@ fn add(
     // Only `--all` on a collection directory declares a source, and returns above.
     if alias.is_some() {
         bail!(
-            "--alias names the source that --all declares for a collection directory, a folder without a SKILL.md of its own"
+            "--alias names a plugin, or the source that --all declares for a collection directory, a folder without a SKILL.md of its own"
         );
     }
     let coverage = Lock::load(&paths.lock())?.repositories;
@@ -998,6 +1017,9 @@ fn add(
     manifest::parse(&doc.to_string(), paths)?;
     if added > 0 {
         write_atomic(&paths.manifest(), doc.to_string().as_bytes())?;
+        for plugin in &plugins {
+            plugin.warn(source);
+        }
     }
     Ok(())
 }
@@ -1178,6 +1200,72 @@ fn insert_declaration(
     Ok(())
 }
 
+/// Adds `[plugins.<name>]` once every agent can find the plugin in the repository.
+fn add_plugin(
+    paths: &Paths,
+    input: &source::Source,
+    plugin: &str,
+    alias: Option<&str>,
+    options: &SkillOptions,
+) -> Result<()> {
+    options.validate(paths)?;
+    if input.skill.is_some() {
+        bail!("@skill conflicts with --plugin");
+    }
+    let name = alias.unwrap_or(plugin);
+    manifest::validate_name(name).context("name the plugin with --alias NAME")?;
+    let mut doc = read_manifest_doc(paths)?;
+    if doc.get("plugins").and_then(|p| p.get(name)).is_some() {
+        println!("= plugin {name} is already in the manifest");
+        return Ok(());
+    }
+    let mut table = Table::new();
+    table.insert("source", value(input.repository.as_str()));
+    if let Some(reference) = &input.git_ref {
+        table.insert("ref", value(reference.as_str()));
+    }
+    if plugin != name {
+        table.insert("plugin", value(plugin));
+    }
+    if let Some(dir) = &input.subdir {
+        table.insert("subdir", value(dir.as_str()));
+    }
+    for (key, values) in [
+        ("agents", &options.agents),
+        ("os", &options.os),
+        ("profiles", &options.only_profiles),
+    ] {
+        let mut seen = BTreeSet::new();
+        let unique: toml_edit::Array = values
+            .iter()
+            .filter(|v| seen.insert(*v))
+            .map(String::as_str)
+            .collect();
+        if !unique.is_empty() {
+            table.insert(key, value(unique));
+        }
+    }
+    // Check the entry the way sync will read it before writing anything.
+    let manifest = manifest::parse(&doc.to_string(), paths)?;
+    let parsed = plugins::parse_one(
+        name,
+        toml::Value::Table(toml::from_str(&table.to_string())?),
+        &manifest.agents,
+        paths,
+    )
+    .with_context(|| format!("plugin `{name}`"))?;
+    let folders = plugins::check(paths, &parsed)?;
+    insert_declaration(&mut doc, "plugins", name, table)?;
+    manifest::parse(&doc.to_string(), paths)?;
+    write_atomic(&paths.manifest(), doc.to_string().as_bytes())?;
+    let at: Vec<String> = folders
+        .iter()
+        .map(|(agent, dir)| format!("{agent} from {}", if dir.is_empty() { "." } else { dir }))
+        .collect();
+    println!("Added plugin {name}: {}", at.join(", "));
+    Ok(())
+}
+
 /// Inserts an entry the way `cargo add` does: in key order when the table is
 /// already sorted, otherwise last.
 fn insert_entry(table: &mut Table, name: &str, item: Item) {
@@ -1240,7 +1328,22 @@ fn configure_skills(
 fn remove(paths: &Paths, names: &[String]) -> Result<()> {
     let mut doc = read_manifest_doc(paths)?;
     let lock = Lock::load(&paths.lock())?;
-    repositories::exclude_removed(paths, &mut doc, &lock.repositories, names)?;
+    let (plugins, skills): (Vec<String>, Vec<String>) = names
+        .iter()
+        .cloned()
+        .partition(|name| doc.get("plugins").and_then(|p| p.get(name)).is_some());
+    if let Some(table) = doc.get_mut("plugins").and_then(Item::as_table_like_mut) {
+        for name in &plugins {
+            table.remove(name);
+        }
+        if table.is_empty() {
+            doc.remove("plugins");
+        }
+    }
+    if !skills.is_empty() {
+        repositories::exclude_removed(paths, &mut doc, &lock.repositories, &skills)?;
+    }
+    manifest::parse(&doc.to_string(), paths)?;
     write_atomic(&paths.manifest(), doc.to_string().as_bytes())
 }
 
@@ -1335,6 +1438,58 @@ fn list(paths: &Paths, active: &Active) -> Result<bool> {
             }
         };
         println!("{:<width$}  {version:<18} {origin}{status}", skill.name);
+    }
+
+    if !manifest.plugins.is_empty() {
+        let installed = plugins::State::load(paths)?;
+        let width = manifest
+            .plugins
+            .iter()
+            .map(|p| p.name.len())
+            .max()
+            .unwrap_or(0);
+        println!("\nPlugins:");
+        for plugin in &manifest.plugins {
+            let entry = lock.plugins.get(&plugin.name).filter(|e| e.matches(plugin));
+            let version = entry.map_or_else(
+                || "not locked".to_string(),
+                |e| {
+                    let commit = &e.commit[..7.min(e.commit.len())];
+                    plugin
+                        .git_ref
+                        .as_ref()
+                        .map_or(commit.to_string(), |r| format!("{r} {commit}"))
+                },
+            );
+            let status = if !manifest::matches_os(&plugin.os) {
+                format!("  (only on {})", plugin.os.join(", "))
+            } else if !active.includes(&plugin.profiles) {
+                format!("  (only for {})", plugin.profiles.join(", "))
+            } else {
+                let mut notes = Vec::new();
+                let mut missing = Vec::new();
+                for harness in &plugin.agents {
+                    if !harness.available()? {
+                        notes.push(harness.absence());
+                    } else if installed.get(harness.id(), &plugin.name).is_none() {
+                        missing.push(harness.id());
+                    }
+                }
+                if !missing.is_empty() {
+                    healthy = false;
+                    notes.insert(0, format!("not installed for {}", missing.join(", ")));
+                }
+                if notes.is_empty() {
+                    String::new()
+                } else {
+                    format!("  ({})", notes.join("; "))
+                }
+            };
+            println!(
+                "  {:<width$}  {version:<18} {}{status}",
+                plugin.name, plugin.source
+            );
+        }
     }
 
     // Everything else the agents will load: app-installed skills, other tools'

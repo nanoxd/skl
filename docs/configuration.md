@@ -12,7 +12,7 @@ commands edit the same file, preserving comments and formatting, then sync by
 default. Commit the manifest alongside the generated `skills.lock` so other
 machines can install the pinned Git versions.
 
-[Manifest](#manifest) · [Declared sources](#declared-sources) · [Lockfile](#lockfile)
+[Manifest](#manifest) · [Declared sources](#declared-sources) · [Plugins](#plugins) · [Lockfile](#lockfile)
 
 ## Manifest
 
@@ -247,6 +247,30 @@ rename skills at install time. Skills in one collection often refer to each othe
 by folder name, such as `../teach/SKILL.md`, and a rename would break those
 references, so choose one copy with `exclude` instead.
 
+## Plugins
+
+`[plugins.<name>]` installs a whole Claude Code or Codex plugin, with its agents,
+commands, hooks, and MCP servers:
+
+```toml
+[plugins.pstack]
+source = "cursor/plugins"
+# The plugin's folder, for every agent or per agent. Found through the
+# repository's marketplace file when unset.
+subdir = { codex = "harness/pstack/codex" }
+```
+
+| Key | Meaning |
+|-----|---------|
+| `source` | Git repository, as for a skill |
+| `ref` | Branch, tag or full commit SHA. Defaults to the remote HEAD |
+| `plugin` | The plugin's name in the repository's marketplace. Defaults to the entry's name |
+| `subdir` | A folder for every agent, or a table of `claude-code` and `codex` folders |
+| `agents` | `claude-code`, `codex`, or both. Defaults to the manifest's agents that install plugins |
+| `profiles`, `os` | As for skills |
+
+See [plugins](plugins.md) for how skl installs them and what it owns.
+
 ## Lockfile
 
 `~/.config/skl/skills.lock` is generated. It records the source, ref, commit and
@@ -294,7 +318,22 @@ member, becomes a small table with its own `version`. A `"*"` app source also
 records its complete export under `members`, as in the example. Single-skill
 `command` entries keep their own `[commands.<name>]` tables.
 
-This layout is lock version 3. skl still reads version 1 and 2 locks, including
+A plugin's `[plugins.<name>]` table records its `source`, `ref`, marketplace
+`plugin` name, `commit`, and the folder each agent installs under `subdirs`:
+
+```toml
+[plugins.pstack]
+source = "cursor/plugins"
+plugin = "pstack"
+commit = "9580c23696ac8d7abed0c166f2f9918800afb819"
+
+[plugins.pstack.subdirs]
+claude-code = "harness/pstack/claude-code"
+codex = "harness/pstack/claude-code"
+```
+
+A lock with plugins is version 4, so an older skl refuses it instead of dropping
+the plugins when it rewrites the lock. Otherwise this layout is lock version 3. skl still reads version 1 and 2 locks, including
 the `[repositories]` and `[xcode]` tables they used, and migrates them the next
 time it writes the lock. `sync --locked` never rewrites an older lock. Command
 snapshots are local provenance rather than downloadable pins, so another machine

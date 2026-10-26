@@ -26,6 +26,8 @@ pub struct Manifest {
     pub repositories: std::collections::BTreeMap<String, crate::repositories::Repository>,
     /// Repositories whose skills an installed app exports, including Xcode.
     pub apps: std::collections::BTreeMap<String, crate::export::App>,
+    /// Plugins each harness installs from skl's own marketplace.
+    pub plugins: Vec<crate::plugins::Plugin>,
 }
 
 pub fn matches_os(os: &[String]) -> bool {
@@ -139,6 +141,7 @@ pub fn parse(text: &str, paths: &Paths) -> Result<Manifest> {
         Some(_) => bail!("`skills` must be a table"),
         None => Table::new(),
     };
+    let plugins = crate::plugins::parse(table.remove("plugins"), &default_agents, paths)?;
     if let Some(key) = table.keys().next() {
         bail!("unknown key `{key}`");
     }
@@ -156,11 +159,22 @@ pub fn parse(text: &str, paths: &Paths) -> Result<Manifest> {
         }
         parsed.push(skill);
     }
+    if let Some(plugin) = plugins
+        .iter()
+        .find(|p| parsed.iter().any(|s| s.name == p.name))
+    {
+        bail!(
+            "`{}` is both a skill and a plugin: rename the plugin entry and set `plugin = \"{}\"`",
+            plugin.name,
+            plugin.plugin
+        );
+    }
     Ok(Manifest {
         agents: default_agents,
         skills: parsed,
         repositories,
         apps,
+        plugins,
     })
 }
 

@@ -125,6 +125,9 @@ fn run_inner(
     let embedded = planned.map(|(_, snapshots)| snapshots);
     let planned = planned.map(|(lock, _)| lock);
     let mut manifest = manifest::load(paths)?;
+    if (planning || planned.is_some()) && !manifest.plugins.is_empty() {
+        bail!("update plans don't cover plugins yet: run `skl update` without a plan");
+    }
     let old_lock = Lock::load(&paths.lock())?;
     let mut out = Report::new(opts.dry_run);
 
@@ -385,6 +388,12 @@ fn run_inner(
     let enabled = |skill: &Skill| skill.enabled(active);
     if let Some(names) = &opts.update {
         for name in names {
+            if let Some(plugin) = manifest.plugins.iter().find(|p| &p.name == name) {
+                if !plugin.enabled(active) {
+                    bail!("plugin `{name}` isn't enabled on this machine");
+                }
+                continue;
+            }
             match manifest.skills.iter().find(|s| &s.name == name) {
                 None => bail!("`{name}` isn't in the manifest"),
                 Some(skill) if !manifest::matches_os(&skill.os) => {
@@ -506,6 +515,7 @@ fn run_inner(
             .filter(|s| !enabled(s))
             .filter_map(|s| Some((s.name.clone(), old_lock.skills.get(&s.name)?.clone())))
             .collect(),
+        plugins: BTreeMap::new(),
     };
     let mut failed = BTreeSet::new();
     let mut candidates = BTreeMap::new();
@@ -688,12 +698,46 @@ fn run_inner(
             failed.insert(name.clone());
         }
     }
+    let (plugin_entries, plugin_events) = crate::plugins::resolve(
+        paths,
+        git,
+        &manifest.plugins,
+        &old_lock.plugins,
+        active,
+        opts,
+    )?;
+    let mut failed_plugins = BTreeSet::new();
+    for event in plugin_events {
+        match event {
+            crate::plugins::Event::Added(name, detail) => out.event('+', &name, detail),
+            crate::plugins::Event::Moved(name, old, new) => {
+                out.event('↑', &name, format!("plugin {old} → {new}"))
+            }
+            crate::plugins::Event::Diff(text) => out.block(&text),
+            crate::plugins::Event::Error(name, err) => {
+                out.error(&name, &err);
+                failed_plugins.insert(name);
+            }
+        }
+    }
+    for name in old_lock.plugins.keys() {
+        if !manifest.plugins.iter().any(|p| &p.name == name) {
+            out.event('-', name, "plugin".into());
+        }
+    }
+    lock.plugins = plugin_entries;
+
     // Version 1 remains byte-for-byte stable for locked legacy installs.
     if !opts.locked
         && (!lock.commands.is_empty()
             || lock.repositories.values().any(|c| c.producer.is_some())
             || old_lock.version >= crate::lock::VERSION)
     {
+        lock.version = crate::lock::VERSION;
+    }
+    if !lock.plugins.is_empty() {
+        lock.version = crate::lock::PLUGINS;
+    } else if lock.version == crate::lock::PLUGINS {
         lock.version = crate::lock::VERSION;
     }
 
@@ -783,6 +827,24 @@ fn run_inner(
         bail!("skills.lock is out of date: run `skl sync` without --locked");
     }
     let state = reconcile(paths, &recorded, &desired, opts, &mut out)?;
+    let installs = crate::plugins::apply(
+        paths,
+        &manifest.plugins,
+        &lock.plugins,
+        &failed_plugins,
+        active,
+        opts.dry_run,
+    )?;
+    for note in installs.notes {
+        out.note(note);
+    }
+    for (name, err) in installs.errors {
+        out.error(&name, &err);
+    }
+    for conflict in installs.conflicts {
+        out.conflict(conflict);
+    }
+    out.plugins += installs.changed;
 
     if !opts.dry_run {
         if lock != old_lock || !paths.lock().exists() {
@@ -791,7 +853,10 @@ fn run_inner(
         state.save(&paths.state())?;
         collect_garbage(paths, &lock, &state)?;
     }
-    Ok((out.finish(manifest.skills.len()), lock))
+    Ok((
+        out.finish(manifest.skills.len(), manifest.plugins.len()),
+        lock,
+    ))
 }
 
 /// Summarizes how a skill's own files changed between two lock entries, as a
@@ -1147,6 +1212,7 @@ fn collect_garbage(paths: &Paths, lock: &Lock, state: &State) -> Result<()> {
             }
         }
     }
+    live.extend(crate::plugins::live(paths, &lock.plugins)?);
     let mut keys: BTreeSet<String> = live.iter().map(|(key, _)| key.clone()).collect();
     // A complete empty wildcard still references its repository cache even
     // though it has no individual skills or store commits to keep alive.
@@ -1201,6 +1267,7 @@ struct Report {
     linked: usize,
     relinked: usize,
     unlinked: usize,
+    plugins: usize,
     problems: usize,
 }
 
@@ -1214,6 +1281,7 @@ impl Report {
             linked: 0,
             relinked: 0,
             unlinked: 0,
+            plugins: 0,
             problems: 0,
         }
     }
@@ -1247,7 +1315,7 @@ impl Report {
         eprintln!("! {message}");
     }
 
-    fn finish(&self, total: usize) -> bool {
+    fn finish(&self, total: usize, plugins: usize) -> bool {
         let mut parts = Vec::new();
         for (count, label) in [
             (self.added, "added"),
@@ -1256,14 +1324,19 @@ impl Report {
             (self.linked, "links created"),
             (self.relinked, "links repointed"),
             (self.unlinked, "links removed"),
+            (self.plugins, "plugin installs changed"),
         ] {
             if count > 0 {
                 parts.push(format!("{count} {label}"));
             }
         }
-        let skills = if total == 1 { "skill" } else { "skills" };
+        let mut skills = format!("{total} {}", if total == 1 { "skill" } else { "skills" });
+        if plugins > 0 {
+            let noun = if plugins == 1 { "plugin" } else { "plugins" };
+            skills = format!("{skills}, {plugins} {noun}");
+        }
         if parts.is_empty() && self.problems == 0 {
-            println!("Up to date: {total} {skills}");
+            println!("Up to date: {skills}");
         } else {
             let lead = if self.dry_run {
                 "Would apply"
@@ -1275,7 +1348,7 @@ impl Report {
             } else {
                 parts.join(", ")
             };
-            println!("{lead}: {changes} ({total} {skills})");
+            println!("{lead}: {changes} ({skills})");
         }
         if self.problems > 0 {
             eprintln!(
