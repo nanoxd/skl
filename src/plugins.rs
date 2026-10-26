@@ -3,7 +3,9 @@
 //! a skill. Each harness then installs it with its own CLI from a marketplace that
 //! skl generates under `<data>/plugins/<agent>`, one symlink per plugin into the
 //! store. Claude Code reads a local marketplace's plugins in place, so a new commit
-//! is a repointed symlink. Codex copies them, so skl adds the plugin again.
+//! is a repointed symlink. Codex copies them, so skl adds the plugin again. Cursor
+//! has no install command and skips symlinks that leave its local plugin folder, so
+//! skl copies the plugin into `~/.cursor/plugins/local` and records the copy's digest.
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{ErrorKind, Read};
@@ -29,15 +31,17 @@ pub const MARKETPLACE: &str = "skl";
 pub enum Harness {
     ClaudeCode,
     Codex,
+    Cursor,
 }
 
 impl Harness {
-    pub const ALL: [Self; 2] = [Self::ClaudeCode, Self::Codex];
+    pub const ALL: [Self; 3] = [Self::ClaudeCode, Self::Codex, Self::Cursor];
 
     pub fn id(self) -> &'static str {
         match self {
             Self::ClaudeCode => "claude-code",
             Self::Codex => "codex",
+            Self::Cursor => "cursor",
         }
     }
 
@@ -45,22 +49,29 @@ impl Harness {
         Self::ALL.into_iter().find(|h| h.id() == id)
     }
 
-    /// The CLI skl installs through.
-    fn program(self) -> &'static str {
+    /// The CLI skl installs through. Cursor has none, so skl copies plugins itself.
+    fn program(self) -> Option<&'static str> {
         match self {
-            Self::ClaudeCode => "claude",
-            Self::Codex => "codex",
+            Self::ClaudeCode => Some("claude"),
+            Self::Codex => Some("codex"),
+            Self::Cursor => None,
         }
     }
 
-    /// Whether this machine has the agent's CLI, so its plugins can be installed.
-    pub fn available(self) -> Result<bool> {
-        Ok(crate::app::executable(self.program())?.is_some())
+    /// Whether this machine has the agent, so its plugins can be installed.
+    pub fn available(self, paths: &Paths) -> Result<bool> {
+        match self.program() {
+            Some(program) => Ok(crate::app::executable(program)?.is_some()),
+            None => Ok(paths.home.join(".cursor").is_dir()),
+        }
     }
 
     /// Why this agent's plugins are skipped when it isn't available.
     pub fn absence(self) -> String {
-        format!("`{}` isn't installed", self.program())
+        match self.program() {
+            Some(program) => format!("`{program}` isn't installed"),
+            None => "Cursor isn't installed (no ~/.cursor)".into(),
+        }
     }
 
     /// Where this harness looks for a repository's marketplace, in order.
@@ -71,6 +82,7 @@ impl Harness {
                 ".agents/plugins/marketplace.json",
                 ".claude-plugin/marketplace.json",
             ],
+            Self::Cursor => &[".cursor-plugin/marketplace.json"],
         }
     }
 
@@ -83,6 +95,7 @@ impl Harness {
                 ".claude-plugin/plugin.json",
                 ".cursor-plugin/plugin.json",
             ],
+            Self::Cursor => &[".cursor-plugin/plugin.json", "plugin.json"],
         }
     }
 
@@ -119,14 +132,14 @@ impl Harness {
     fn install(self, id: &str) -> Vec<String> {
         match self {
             Self::ClaudeCode => args(&["plugin", "install", id, "--scope", "user", "--json"]),
-            Self::Codex => args(&["plugin", "add", id, "--json"]),
+            _ => args(&["plugin", "add", id, "--json"]),
         }
     }
 
     fn uninstall(self, id: &str) -> Vec<String> {
         match self {
             Self::ClaudeCode => args(&["plugin", "uninstall", id, "--scope", "user", "--json"]),
-            Self::Codex => args(&["plugin", "remove", id, "--json"]),
+            _ => args(&["plugin", "remove", id, "--json"]),
         }
     }
 
@@ -135,13 +148,22 @@ impl Harness {
         match self {
             Self::ClaudeCode => "restart Claude Code or run /reload-plugins",
             Self::Codex => "restart Codex",
+            Self::Cursor => "reload the Cursor window",
+        }
+    }
+
+    /// How the agent names an install: `NAME@skl`, or Cursor's local folder name.
+    fn label(self, name: &str) -> String {
+        match self {
+            Self::Cursor => name.to_owned(),
+            _ => format!("{name}@{MARKETPLACE}"),
         }
     }
 
     /// Whether a new commit needs the plugin installed again. Claude Code reads a
     /// local marketplace's plugin folder in place; Codex keeps a copy.
     fn copies(self) -> bool {
-        self == Self::Codex
+        self != Self::ClaudeCode
     }
 
     /// The registered path of the marketplace named `name`, if any.
@@ -149,7 +171,7 @@ impl Harness {
         let value: serde_json::Value = parse_json(output)?;
         let entries = match self {
             Self::ClaudeCode => value.as_array().cloned().unwrap_or_default(),
-            Self::Codex => value
+            _ => value
                 .get("marketplaces")
                 .and_then(|m| m.as_array())
                 .cloned()
@@ -161,7 +183,7 @@ impl Harness {
             }
             let key = match self {
                 Self::ClaudeCode => "path",
-                Self::Codex => "root",
+                _ => "root",
             };
             Some(PathBuf::from(entry.get(key)?.as_str()?))
         }))
@@ -172,7 +194,7 @@ impl Harness {
         let value: serde_json::Value = parse_json(output)?;
         let (entries, key) = match self {
             Self::ClaudeCode => (value.as_array().cloned().unwrap_or_default(), "id"),
-            Self::Codex => (
+            _ => (
                 value
                     .get("installed")
                     .and_then(|i| i.as_array())
@@ -304,7 +326,7 @@ pub fn parse_one(
             let mut parsed = BTreeMap::new();
             for (agent, dir) in dirs {
                 let harness = Harness::named(&agent).with_context(|| {
-                    format!("`subdir` names `{agent}`, which doesn't install plugins: use claude-code or codex")
+                    format!("`subdir` names `{agent}`, which doesn't install plugins: use claude-code, codex or cursor")
                 })?;
                 let Value::String(dir) = dir else {
                     bail!("`subdir.{agent}` must be a string");
@@ -323,7 +345,7 @@ pub fn parse_one(
                     bail!("`agents` must be an array of strings");
                 };
                 let harness = Harness::named(&id).with_context(|| {
-                    format!("`{id}` doesn't install plugins: use claude-code or codex")
+                    format!("`{id}` doesn't install plugins: use claude-code, codex or cursor")
                 })?;
                 if !agents.contains(&harness) {
                     agents.push(harness);
@@ -339,7 +361,7 @@ pub fn parse_one(
                 .collect();
             if agents.is_empty() {
                 bail!(
-                    "none of the manifest's agents install plugins: set agents to claude-code or codex"
+                    "none of the manifest's agents install plugins: set agents to claude-code, codex or cursor"
                 );
             }
             agents
@@ -664,8 +686,11 @@ pub struct Installed {
     pub name: String,
     /// The harness's id for it, such as `pstack@skl`.
     pub id: String,
-    /// The store folder the marketplace links to.
+    /// The store folder the marketplace links to, or that Cursor's copy came from.
     pub target: PathBuf,
+    /// The digest of Cursor's copy when skl made it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -783,11 +808,13 @@ pub fn apply(
             for (name, (own, target)) in &desired {
                 match recorded.iter().find(|i| &i.name == name) {
                     None => outcome.notes.push(format!(
-                        "would install {own}@{MARKETPLACE} in {}",
+                        "would install {} in {}",
+                        harness.label(own),
                         harness.id()
                     )),
                     Some(record) if &record.target != target => outcome.notes.push(format!(
-                        "would update {own}@{MARKETPLACE} in {}",
+                        "would update {} in {}",
+                        harness.label(own),
                         harness.id()
                     )),
                     Some(_) => continue,
@@ -797,14 +824,14 @@ pub fn apply(
             for record in recorded.iter().filter(|r| !desired.contains_key(&r.name)) {
                 outcome.notes.push(format!(
                     "would uninstall {} from {}",
-                    record.id,
+                    harness.label(&record.id),
                     harness.id()
                 ));
                 outcome.changed += 1;
             }
             continue;
         }
-        if !harness.available()? {
+        if !harness.available(paths)? {
             outcome.notes.push(format!(
                 "{}: {}, so its plugins are skipped",
                 harness.id(),
@@ -813,14 +840,25 @@ pub fn apply(
             continue;
         }
         let before = outcome.changed;
-        apply_cli(
-            paths,
-            harness,
-            &mut state,
-            &recorded,
-            &desired,
-            &mut outcome,
-        )?;
+        match harness.program() {
+            Some(program) => apply_cli(
+                paths,
+                harness,
+                program,
+                &mut state,
+                &recorded,
+                &desired,
+                &mut outcome,
+            )?,
+            None => apply_copies(
+                paths,
+                harness,
+                &mut state,
+                &recorded,
+                &desired,
+                &mut outcome,
+            )?,
+        }
         if outcome.changed > before {
             reload.push(harness.reload());
         }
@@ -873,12 +911,12 @@ fn desired(
 fn apply_cli(
     paths: &Paths,
     harness: Harness,
+    program: &str,
     state: &mut State,
     recorded: &[Installed],
     desired: &BTreeMap<String, (String, PathBuf)>,
     outcome: &mut Outcome,
 ) -> Result<()> {
-    let program = harness.program();
     let installed = match run(program, &harness.list()).and_then(|out| harness.installed(&out)) {
         Ok(installed) => installed,
         Err(err) => {
@@ -940,6 +978,7 @@ fn apply_cli(
             name: name.clone(),
             id: id.clone(),
             target: target.clone(),
+            digest: None,
         });
         state.save(paths)?;
         if let Some(old) = renamed
@@ -986,6 +1025,226 @@ fn apply_cli(
         }
     }
     Ok(())
+}
+
+/// Cursor's folder for plugins installed from disk.
+pub fn local_dir(paths: &Paths) -> PathBuf {
+    paths.home.join(".cursor/plugins/local")
+}
+
+/// Copies plugins into Cursor's local plugin folder. A copy is skl's only while it
+/// still has the digest skl recorded, so an edited or foreign folder is a conflict.
+fn apply_copies(
+    paths: &Paths,
+    harness: Harness,
+    state: &mut State,
+    recorded: &[Installed],
+    desired: &BTreeMap<String, (String, PathBuf)>,
+    outcome: &mut Outcome,
+) -> Result<()> {
+    let local = local_dir(paths);
+    let ours = |record: &Installed| -> Result<bool> {
+        let dir = local.join(&record.id);
+        Ok(match fs::symlink_metadata(&dir) {
+            Err(err) if err.kind() == ErrorKind::NotFound => false,
+            Err(err) => return Err(err).with_context(|| format!("checking {}", dir.display())),
+            Ok(meta) => meta.is_dir() && record.digest.as_deref() == digest(&dir).ok().as_deref(),
+        })
+    };
+    let changed = |record: &Installed| {
+        format!(
+            "{} changed since skl copied it, so skl left it in place and no longer manages it",
+            paths.tilde(&local.join(&record.id))
+        )
+    };
+    for record in recorded.iter().filter(|r| !desired.contains_key(&r.name)) {
+        let dir = local.join(&record.id);
+        if ours(record)? {
+            fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
+        } else if dir.symlink_metadata().is_ok() {
+            outcome.conflicts.push(changed(record));
+        }
+        state.drop(harness.id(), &record.name);
+        state.save(paths)?;
+        outcome
+            .notes
+            .push(format!("uninstalled {} from {}", record.id, harness.id()));
+        outcome.changed += 1;
+    }
+    for (name, (own, target)) in desired {
+        let previous = state.get(harness.id(), name).cloned();
+        let result = (|| -> Result<Option<&'static str>> {
+            let wanted = digest(target)?;
+            let dir = local.join(own);
+            let owned = match &previous {
+                Some(record) => ours(record)?,
+                None => false,
+            };
+            let present = dir.symlink_metadata().is_ok();
+            let same_folder = previous.as_ref().is_some_and(|p| &p.id == own);
+            if present && !(owned && same_folder) {
+                match previous.as_ref().filter(|_| same_folder) {
+                    // Edited since skl copied it: it's the user's now.
+                    Some(record) => {
+                        outcome.conflicts.push(changed(record));
+                        state.drop(harness.id(), name);
+                        state.save(paths)?;
+                    }
+                    None => outcome.conflicts.push(format!(
+                        "{} already exists outside skl: move it aside, or remove [plugins.{name}]",
+                        paths.tilde(&dir)
+                    )),
+                }
+                return Ok(None);
+            }
+            if let Some(record) = previous
+                .as_ref()
+                .filter(|p| present && p.digest.as_deref() == Some(&wanted))
+            {
+                // Same content from another commit: only the record moves.
+                if &record.target != target {
+                    state.set(Installed {
+                        target: target.clone(),
+                        ..record.clone()
+                    });
+                    state.save(paths)?;
+                }
+                return Ok(None);
+            }
+            // Record the copy before making it, so an interrupted run still owns it.
+            state.set(Installed {
+                agent: harness.id().into(),
+                name: name.clone(),
+                id: own.clone(),
+                target: target.clone(),
+                digest: Some(wanted.clone()),
+            });
+            state.save(paths)?;
+            fs::create_dir_all(&local)?;
+            // Stage beside the local folder, not in it, so Cursor never loads a half copy.
+            let staging = local
+                .parent()
+                .context("Cursor's plugin folder has no parent")?
+                .join(format!(".skl-{own}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&staging);
+            copy_tree(target, &staging)
+                .with_context(|| format!("copying {}", paths.tilde(target)))?;
+            if present {
+                fs::remove_dir_all(&dir).with_context(|| format!("replacing {}", dir.display()))?;
+            }
+            fs::rename(&staging, &dir).with_context(|| format!("installing {}", dir.display()))?;
+            if digest(&dir)? != wanted {
+                bail!(
+                    "{} doesn't match the plugin after copying",
+                    paths.tilde(&dir)
+                );
+            }
+            // A plugin renamed upstream leaves its old copy behind.
+            if let Some(old) = previous.as_ref().filter(|p| &p.id != own)
+                && ours(old)?
+            {
+                fs::remove_dir_all(local.join(&old.id))?;
+            }
+            Ok(Some(if present || previous.is_some() {
+                "updated"
+            } else {
+                "installed"
+            }))
+        })();
+        match result {
+            Ok(Some(action)) => {
+                outcome
+                    .notes
+                    .push(format!("{action} {own} in {}", harness.id()));
+                outcome.changed += 1;
+            }
+            Ok(None) => {}
+            Err(err) => {
+                if !local.join(own).exists() {
+                    match &previous {
+                        Some(record) => state.set(record.clone()),
+                        None => state.drop(harness.id(), name),
+                    }
+                    state.save(paths)?;
+                }
+                outcome
+                    .errors
+                    .push((name.clone(), format!("{} install: {err:#}", harness.id())));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Copies a plugin folder, keeping symlinks as links and the executable bit.
+fn copy_tree(source: &Path, dest: &Path) -> Result<()> {
+    fs::create_dir_all(dest)?;
+    let mut entries: Vec<_> = fs::read_dir(source)?.collect::<Result<_, _>>()?;
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        let path = entry.path();
+        let target = dest.join(entry.file_name());
+        let meta = fs::symlink_metadata(&path)?;
+        if meta.is_dir() {
+            copy_tree(&path, &target)?;
+        } else if meta.file_type().is_symlink() {
+            std::os::unix::fs::symlink(fs::read_link(&path)?, &target)?;
+        } else if meta.is_file() {
+            fs::copy(&path, &target)?;
+        } else {
+            bail!("unsupported file in plugin: {}", path.display());
+        }
+    }
+    Ok(())
+}
+
+/// A digest of a plugin folder's paths, file contents, link targets and executable
+/// bits, so a copy can be told apart from one someone edited.
+pub fn digest(root: &Path) -> Result<String> {
+    use sha2::{Digest as _, Sha256};
+    use std::os::unix::fs::PermissionsExt;
+    fn visit(root: &Path, dir: &Path, hash: &mut Sha256) -> Result<()> {
+        let mut entries: Vec<_> = fs::read_dir(dir)
+            .with_context(|| format!("reading {}", dir.display()))?
+            .collect::<Result<_, _>>()?;
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let meta = fs::symlink_metadata(&path)?;
+            let relative = path.strip_prefix(root)?.as_os_str().as_encoded_bytes();
+            hash.update((relative.len() as u64).to_le_bytes());
+            hash.update(relative);
+            if meta.is_dir() {
+                hash.update(b"dir");
+                visit(root, &path, hash)?;
+            } else if meta.file_type().is_symlink() {
+                let link = fs::read_link(&path)?;
+                let link = link.as_os_str().as_encoded_bytes();
+                hash.update(b"link");
+                hash.update((link.len() as u64).to_le_bytes());
+                hash.update(link);
+            } else if meta.is_file() {
+                hash.update(if meta.permissions().mode() & 0o111 != 0 {
+                    b"exec"
+                } else {
+                    b"file"
+                });
+                let bytes = fs::read(&path)?;
+                hash.update((bytes.len() as u64).to_le_bytes());
+                hash.update(bytes);
+            } else {
+                bail!("unsupported file in plugin: {}", path.display());
+            }
+        }
+        Ok(())
+    }
+    let mut hash = Sha256::new();
+    visit(root, root, &mut hash)?;
+    Ok(hash
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 /// Writes the generated marketplace: one symlink per plugin into the store and a
@@ -1155,7 +1414,7 @@ pub struct AgentReport {
     /// What skl recorded installing: the agent's id for it and its store folder.
     pub id: Option<String>,
     pub recorded_target: Option<PathBuf>,
-    /// Where the agent loads it from: skl's marketplace link.
+    /// Where the agent loads it from: skl's marketplace link, or Cursor's copy.
     pub install_path: Option<PathBuf>,
     pub status: InstallStatus,
 }
@@ -1167,6 +1426,8 @@ pub enum InstallStatus {
     NotInstalled,
     /// Installed at an older commit or folder.
     Outdated,
+    /// Cursor's copy no longer has the digest skl recorded.
+    Changed,
     /// The agent isn't installed on this machine.
     Unavailable,
     /// Excluded by profiles or OS.
@@ -1188,6 +1449,7 @@ impl std::fmt::Display for InstallStatus {
             Self::Installed => "installed (owned)",
             Self::NotInstalled => "not installed",
             Self::Outdated => "installed from an older commit or folder (owned)",
+            Self::Changed => "copy changed since skl made it",
             Self::Unavailable => "agent isn't installed",
             Self::Disabled => "excluded",
             Self::Stale => "installed but no longer selected (owned)",
@@ -1206,7 +1468,10 @@ fn readable(harness: Harness, dir: &Path) -> bool {
 
 /// Where an agent loads a recorded install from.
 pub fn install_path(paths: &Paths, harness: Harness, record: &Installed) -> PathBuf {
-    marketplace_dir(paths, harness).join(record.id.split('@').next().unwrap_or_default())
+    match harness {
+        Harness::Cursor => local_dir(paths).join(&record.id),
+        _ => marketplace_dir(paths, harness).join(record.id.split('@').next().unwrap_or_default()),
+    }
 }
 
 pub fn report(
@@ -1250,7 +1515,7 @@ pub fn report(
         let content_available = content_path
             .as_deref()
             .is_some_and(|dir| readable(harness, dir));
-        let available = harness.available()?;
+        let available = harness.available(paths)?;
         let install_path = record.map(|r| install_path(paths, harness, r));
         let status = if !selected || !enabled {
             if record.is_some() {
@@ -1263,6 +1528,20 @@ pub fn report(
         } else {
             match record {
                 None => InstallStatus::NotInstalled,
+                Some(r)
+                    if harness == Harness::Cursor
+                        && r.digest.as_deref()
+                            != install_path
+                                .as_deref()
+                                .and_then(|p| digest(p).ok())
+                                .as_deref() =>
+                {
+                    if install_path.as_deref().is_some_and(|p| p.exists()) {
+                        InstallStatus::Changed
+                    } else {
+                        InstallStatus::NotInstalled
+                    }
+                }
                 Some(r) if Some(&r.target) != content_path.as_ref() => InstallStatus::Outdated,
                 Some(_) => InstallStatus::Installed,
             }

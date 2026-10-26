@@ -6,7 +6,7 @@ Guidance for coding agents (Claude Code, Codex, and others) working in this repo
 
 `skl` is a Rust CLI that keeps agent skills (directories holding a `SKILL.md`) in sync across machines. A manifest (`~/.config/skl/skills.toml`) lists the skills a machine should have and a lockfile (`skills.lock`) pins each git skill to a commit. Both are meant to live in dotfiles. Skills are unpacked into a content store under `~/.local/share/skl` and symlinked into each agent's skills directory (`~/.claude/skills` for Claude Code, `~/.agents/skills` for Codex, or any path).
 
-Plugins (`[plugins.<name>]`) are pinned and unpacked into the store the same way, then installed through Claude Code's and Codex's own plugin CLIs from a marketplace skl generates per agent.
+Plugins (`[plugins.<name>]`) are pinned and unpacked into the store the same way, then installed through Claude Code's and Codex's own plugin CLIs from a marketplace skl generates per agent, or copied into Cursor's `~/.cursor/plugins/local`.
 
 Commands: `sync`, `update`, `add`, `remove`, `list`, `profile`, `agents`. Skills can be limited to named profiles, and each machine keeps its own active profiles in `<data>/profile`. Commands that can write hold an exclusive `flock` on `<data>/run.lock`; `list`, `agents`, and `agents list` are read-only.
 
@@ -21,7 +21,7 @@ Commands: `sync`, `update`, `add`, `remove`, `list`, `profile`, `agents`. Skills
 - `src/lock.rs`: the versioned lockfile.
 - `src/agents.rs`: known agents and their skills directories.
 - `src/paths.rs`: every location, from `HOME`, `SKL_CONFIG_DIR`/`XDG_CONFIG_HOME` and `SKL_DATA_DIR`/`XDG_DATA_HOME`.
-- `src/plugins.rs`: `[plugins]` entries, their lock entries, the marketplaces skl generates under `<data>/plugins/<agent>`, the Claude Code and Codex CLI adapters that install them, and the read-only plugin report `info`, `list`, and `doctor` share.
+- `src/plugins.rs`: `[plugins]` entries, their lock entries, the marketplaces skl generates under `<data>/plugins/<agent>`, the Claude Code and Codex CLI adapters and Cursor copies that install them, and the read-only plugin report `info`, `list`, and `doctor` share.
 - `src/plugin.rs`: detects the plugin around skills that `add` and `discover` see, for the warning that points at `add --plugin`.
 - `src/profile.rs`: resolves the active profiles from `--profile`, `SKL_PROFILE`, then the machine's saved setting.
 - `tests/cli.rs`: end-to-end tests that run the built binary.
@@ -58,7 +58,7 @@ These are tested in `tests/cli.rs` and must hold after any change.
 - A skill that fails to resolve, fetch or unpack keeps its previous lock entry, store content and links. A missing ordinary local skill keeps its links. Missing command executables, unavailable apps (including a Mac without Xcode), and absent optional local directories remove only owned links; command lock entries and snapshots stay cached.
 - Garbage collection keeps every store commit and repo cache referenced by the lock or by an owned link.
 - `--locked` fails rather than changing the lock.
-- Plugin installs are recorded in `<data>/plugins/state.toml` before the harness CLI runs, and only recorded installs are updated or uninstalled. The same plugin from another marketplace is a conflict, never touched. Dry runs run no harness CLI, and tests use the fake `claude`/`codex` in `tests/fixtures/harness.rs`, never real ones.
+- Plugin installs are recorded in `<data>/plugins/state.toml` before the harness CLI runs, and only recorded installs are updated or uninstalled. The same plugin from another marketplace is a conflict, never touched. A Cursor copy is replaced or removed only while it matches the digest skl recorded; an edited or foreign folder is a conflict. Dry runs run no harness CLI, and tests use the fake `claude`/`codex` in `tests/fixtures/harness.rs`, never real ones.
 - Manifest commands, including app source exports, run only during explicit sync/update, never in dry runs, locked syncs, read-only commands, or automatic sync after edits. Saved plans run only built-in app exports such as Xcode. Command failure preserves the previous install; imports reject symlinks and special files and obey time/output limits.
 
 ## Tests

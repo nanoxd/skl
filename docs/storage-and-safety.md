@@ -34,7 +34,8 @@ Understand link ownership, backups, and where skl keeps its files.
   checkout, `skl` writes to its target and keeps the link. Writes go through a
   temporary file, so an interrupted run never leaves half a file.
 - **Plugins.** skl records each plugin install in `plugins/state.toml` before making
-  it, and only updates or uninstalls the plugins it recorded. See
+  it, and only updates or uninstalls the plugins it recorded. A Cursor copy is
+  skl's only while it still matches the digest skl recorded. See
   [plugins](plugins.md#ownership-and-safety).
 - **`SKILL.md` must be a regular file.** A symlinked `SKILL.md`, which could point
   anywhere, isn't treated as a skill and is never installed.

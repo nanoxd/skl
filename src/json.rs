@@ -204,17 +204,22 @@ pub fn list(paths: &Paths, active: &Active) -> Result<bool> {
         let report = crate::plugins::report(paths, active, plugin, &lock, &state)?;
         // Keep the same health criteria as the human list command.
         for agent in &report.agents {
-            if !matches!(
-                agent.status,
+            let (code, message) = match agent.status {
                 crate::plugins::InstallStatus::NotInstalled
-                    | crate::plugins::InstallStatus::Outdated
-            ) {
-                continue;
-            }
+                | crate::plugins::InstallStatus::Outdated => (
+                    "plugin-not-installed",
+                    format!("plugin is not installed for {}", agent.agent),
+                ),
+                crate::plugins::InstallStatus::Changed => (
+                    "plugin-changed",
+                    format!("{}'s copy changed since skl made it", agent.agent),
+                ),
+                _ => continue,
+            };
             diagnostics.push(json!({
-                "code": "plugin-not-installed", "severity": "error", "skill": plugin.name,
+                "code": code, "severity": "error", "skill": plugin.name,
                 "path": agent.install_path.as_deref().map(path_value).transpose()?,
-                "message": format!("plugin is not installed for {}", agent.agent),
+                "message": message,
                 "remedy": "Run skl sync to install plugins.",
             }));
         }

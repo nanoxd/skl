@@ -6625,6 +6625,127 @@ fn change_plugin(env: &Env, text: &str) {
 }
 
 #[test]
+fn cursor_plugins_are_copies_skl_owns_only_while_they_match() {
+    let env = Env::new();
+    let url = plugins_repo(&env);
+    // Cursor finds the plugin through its own marketplace, whose sources omit `./`.
+    let remote = env.remote("plugins");
+    fs::create_dir_all(remote.join(".cursor-plugin")).unwrap();
+    fs::write(
+        remote.join(".cursor-plugin/marketplace.json"),
+        r#"{"name": "fixture-plugins", "plugins": [{"name": "pstack", "source": "pstack"}]}"#,
+    )
+    .unwrap();
+    commit(&remote, "cursor marketplace");
+    env.write_manifest(&format!(
+        "[plugins.pstack]\nsource = '{url}'\nagents = ['cursor']\n"
+    ));
+
+    // Without Cursor there is nothing to install into.
+    let out = env.ok(&["sync"]);
+    assert!(
+        out.contains("cursor: Cursor isn't installed (no ~/.cursor), so its plugins are skipped"),
+        "{out}"
+    );
+    assert_eq!(
+        lock_toml(&env)["plugins"]["pstack"]["subdirs"]["cursor"].as_str(),
+        Some("pstack")
+    );
+
+    // Cursor skips links that leave its folder, so skl copies the plugin.
+    fs::create_dir_all(env.home.join(".cursor")).unwrap();
+    let out = env.ok(&["sync"]);
+    assert!(out.contains("installed pstack in cursor"), "{out}");
+    assert!(out.contains("reload the Cursor window"), "{out}");
+    let copy = env.home.join(".cursor/plugins/local/pstack");
+    assert!(!copy.is_symlink());
+    assert!(copy.join(".cursor-plugin/plugin.json").is_file());
+    assert_eq!(
+        fs::read_to_string(copy.join("agents/poteto-agent.md")).unwrap(),
+        "agent"
+    );
+    let info = env.ok(&["info", "pstack"]);
+    assert!(
+        info.contains("Agent cursor: installed (owned) as pstack"),
+        "{info}"
+    );
+    assert!(
+        info.contains("Installed from: ~/.cursor/plugins/local/pstack"),
+        "{info}"
+    );
+    let out = env.ok(&["verify", "pstack"]);
+    assert_eq!(out.matches("verified: pstack [cursor]").count(), 2, "{out}");
+
+    // A new commit replaces skl's own copy.
+    change_plugin(&env, "agent v2");
+    let out = env.ok(&["update"]);
+    assert!(out.contains("updated pstack in cursor"), "{out}");
+    assert_eq!(
+        fs::read_to_string(copy.join("agents/poteto-agent.md")).unwrap(),
+        "agent v2"
+    );
+    assert!(
+        fs::read_dir(env.home.join(".cursor/plugins"))
+            .unwrap()
+            .all(|e| {
+                !e.unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".skl-")
+            })
+    );
+
+    // An edited copy is the user's: reported, never overwritten or deleted.
+    fs::write(copy.join("agents/poteto-agent.md"), "my edit").unwrap();
+    let doctor = env.skl(&["doctor"]);
+    assert!(!doctor.status.success());
+    assert!(doctor.stdout_text().contains("plugin-changed: pstack"));
+    assert!(
+        env.skl(&["list"])
+            .stdout_text()
+            .contains("cursor copy changed")
+    );
+    assert!(
+        env.skl(&["verify"])
+            .stdout_text()
+            .contains("drift: pstack [cursor]")
+    );
+    change_plugin(&env, "agent v3");
+    let err = env.fails(&["update"]);
+    assert!(
+        err.contains("~/.cursor/plugins/local/pstack changed since skl copied it"),
+        "{err}"
+    );
+    assert_eq!(
+        fs::read_to_string(copy.join("agents/poteto-agent.md")).unwrap(),
+        "my edit"
+    );
+    // skl no longer owns it, so the folder stays a conflict until it moves.
+    let err = env.fails(&["sync"]);
+    assert!(
+        err.contains("~/.cursor/plugins/local/pstack already exists outside skl"),
+        "{err}"
+    );
+    let out = env.ok(&["remove", "pstack"]);
+    assert!(!out.contains("uninstalled"), "{out}");
+    assert!(copy.join("agents/poteto-agent.md").is_file());
+
+    // Once moved aside, skl installs and later removes its own copy.
+    fs::remove_dir_all(&copy).unwrap();
+    env.write_manifest(&format!(
+        "[plugins.pstack]\nsource = '{url}'\nagents = ['cursor']\n"
+    ));
+    env.ok(&["sync"]);
+    assert_eq!(
+        fs::read_to_string(copy.join("agents/poteto-agent.md")).unwrap(),
+        "agent v3"
+    );
+    let out = env.ok(&["remove", "pstack"]);
+    assert!(out.contains("uninstalled pstack from cursor"), "{out}");
+    assert!(!copy.exists());
+}
+
+#[test]
 fn plugin_inspection_reports_installs_links_and_drift() {
     let env = Env::new();
     let url = plugins_repo(&env);

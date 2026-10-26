@@ -41,7 +41,8 @@ rejected. Git and tar must be available. Verification never initializes a
 repository or fetches, including Git's implicit partial-clone lazy fetching.
 Missing cached commits or repositories produce `unavailable`, never `verified`.
 
-Each plugin's store folder is verified the same way, once per folder.
+Each plugin's store folder is verified the same way, once per folder, along with
+Cursor's copy of it.
 
 Cached app skills, including Xcode's, are checked against their lockfile digest
 without running the app or any external tools. The digest includes contents, paths, types, and
@@ -84,7 +85,7 @@ Paths that cannot be represented as UTF-8 produce a structured runtime error.
   `profile_source`, `os`, `enabled`, `exclusions`, and `agents`. Each agent has
   `agent`, `available`, `content_available`, `status`, and nullable `subdir`,
   `locked_subdir`, `content_path`, `id`, `recorded_target`, and `install_path`.
-  Status is `installed`, `not_installed`, `outdated`, `unavailable`,
+  Status is `installed`, `not_installed`, `outdated`, `changed`, `unavailable`,
   `disabled`, or `stale`.
 - `list` data has `skills` (the same reports, sorted by name), `plugins` (plugin
   reports, sorted by name), `unmanaged`
@@ -96,7 +97,7 @@ Paths that cannot be represented as UTF-8 produce a structured runtime error.
   `stale-lock`, `missing-tool`, `source-not-locked`, `not-locked`, `invalid-cache`,
   `missing-local-skill`, `stale-state`, `missing-link`, `unreadable-link`,
   `outdated-link`, `broken-link`, or `link-conflict`, and for plugins
-  `plugin-not-installed`, `outdated-plugin`, or `stale-plugin`.
+  `plugin-not-installed`, `outdated-plugin`, `plugin-changed`, or `stale-plugin`.
 
 - `verify` data has `active_profiles`, `profile_source`, and `skills`, sorted by
   name, then plugins. Each has `name`, `source_kind` (`git`, `command`, `app`,
@@ -109,7 +110,7 @@ Paths that cannot be represented as UTF-8 produce a structured runtime error.
 
 Runtime failures use `runtime-error`. List health diagnostics use `not-linked`
 (or `source-not-locked` for undiscovered wildcard sources), and
-`plugin-not-installed` for plugins. Exit codes match human
+`plugin-not-installed` or `plugin-changed` for plugins. Exit codes match human
 output: `info` succeeds when inspection completes, even if content or links are
 missing; `doctor` fails when it finds any diagnostic; `list` fails for missing
 active links or undiscovered active wildcard sources. List retains its

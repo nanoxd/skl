@@ -249,8 +249,8 @@ references, so choose one copy with `exclude` instead.
 
 ## Plugins
 
-`[plugins.<name>]` installs a whole Claude Code or Codex plugin, with its agents,
-commands, hooks, and MCP servers:
+`[plugins.<name>]` installs a whole Claude Code, Codex, or Cursor plugin, with its
+agents, commands, hooks, and MCP servers:
 
 ```toml
 [plugins.pstack]
@@ -266,7 +266,7 @@ subdir = { codex = "harness/pstack/codex" }
 | `ref` | Branch, tag or full commit SHA. Defaults to the remote HEAD |
 | `plugin` | The plugin's name in the repository's marketplace. Defaults to the entry's name |
 | `subdir` | A folder for every agent, or a table of `claude-code` and `codex` folders |
-| `agents` | `claude-code`, `codex`, or both. Defaults to the manifest's agents that install plugins |
+| `agents` | Any of `claude-code`, `codex`, and `cursor`. Defaults to the manifest's agents that install plugins |
 | `profiles`, `os` | As for skills |
 
 See [plugins](plugins.md) for how skl installs them and what it owns.
