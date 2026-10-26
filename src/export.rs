@@ -184,13 +184,6 @@ pub fn append(
             continue;
         }
         for name in app.names(alias, entries) {
-            if manifest.skills.iter().any(|s| s.name == name)
-                || members.iter().any(|s: &Skill| s.name == name)
-            {
-                bail!(
-                    "source `{alias}` skill `{name}` conflicts with another declaration; use source = \"{alias}\" for an override"
-                );
-            }
             let dir = entries
                 .get(&name)
                 .filter(|e| e.repository.as_deref() == Some(alias.as_str()))
@@ -203,9 +196,27 @@ pub fn append(
                 agents: targets.agents.clone(),
                 profiles: targets.profiles.clone(),
                 os: targets.os.clone(),
+                group: Some(alias.clone()),
             });
         }
     }
+    let mut clashes = Vec::new();
+    for (index, skill) in members.iter().enumerate() {
+        if let Some(other) = manifest
+            .skills
+            .iter()
+            .chain(&members[..index])
+            .find(|s| s.name == skill.name)
+        {
+            clashes.push(crate::repositories::Clash {
+                alias: skill.group.clone().expect("an app member has a source"),
+                location: None,
+                name: skill.name.clone(),
+                other,
+            });
+        }
+    }
+    crate::repositories::conflicts(paths, manifest, clashes)?;
     manifest.skills.extend(members);
     Ok(())
 }
@@ -255,6 +266,7 @@ impl Export {
         Ok(Coverage {
             source: String::new(),
             git_ref: None,
+            subdir: None,
             producer: Some(app.producer.clone()),
             members,
         })
@@ -269,7 +281,7 @@ impl Export {
         alias: &str,
         app: &App,
         old: &BTreeMap<String, CommandSkill>,
-        reserved: &[Skill],
+        manifest: &Manifest,
         update: Option<&Vec<String>>,
     ) -> Result<(BTreeMap<String, CommandSkill>, Vec<String>)> {
         let mut names: BTreeSet<String> = app.overrides.keys().cloned().collect();
@@ -281,14 +293,22 @@ impl Export {
         if update.is_some_and(|names| !names.is_empty()) {
             names.extend(old.keys().filter(|n| app.selects(n)).cloned());
         }
-        if let Some(name) = names
-            .iter()
-            .find(|n| reserved.iter().any(|s| &&s.name == n))
-        {
-            bail!(
-                "source `{alias}` skill `{name}` conflicts with another declaration; use source = \"{alias}\" for an override"
-            );
-        }
+        crate::repositories::conflicts(
+            paths,
+            manifest,
+            names
+                .iter()
+                .filter_map(|name| {
+                    let other = manifest.skills.iter().find(|s| &s.name == name)?;
+                    Some(crate::repositories::Clash {
+                        alias: alias.to_owned(),
+                        location: None,
+                        name: name.clone(),
+                        other,
+                    })
+                })
+                .collect(),
+        )?;
         let mut entries = BTreeMap::new();
         let mut errors = Vec::new();
         for name in names {

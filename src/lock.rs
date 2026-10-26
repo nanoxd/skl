@@ -52,6 +52,8 @@ struct Source {
     #[serde(rename = "ref", default, skip_serializing_if = "Option::is_none")]
     git_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    subdir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     command: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     version_command: Option<Vec<String>>,
@@ -124,6 +126,7 @@ impl TryFrom<Stored> for Lock {
                     },
                     source: source.source,
                     git_ref: source.git_ref,
+                    subdir: source.subdir,
                     members: source.members.unwrap_or_default(),
                 };
                 lock.repositories.insert(alias.clone(), coverage);
@@ -161,6 +164,7 @@ impl TryFrom<Stored> for Lock {
                 crate::repositories::Coverage {
                     source: String::new(),
                     git_ref: None,
+                    subdir: None,
                     producer: Some(producer.clone()),
                     members: stored
                         .xcode
@@ -193,6 +197,7 @@ impl From<Lock> for Stored {
                 let mut source = Source {
                     source: coverage.source,
                     git_ref: coverage.git_ref,
+                    subdir: coverage.subdir,
                     members: Some(coverage.members),
                     ..Source::default()
                 };
@@ -312,7 +317,11 @@ impl LockedSkill {
     pub fn matches(&self, origin: &GitOrigin) -> bool {
         self.source == origin.source
             && self.git_ref == origin.git_ref
-            && origin.subdir.as_ref().is_none_or(|dir| *dir == self.subdir)
+            && match &origin.subdir {
+                Some(dir) => *dir == self.subdir,
+                // A name found outside a source's new `subdir` is looked up again.
+                None => crate::git::within(&self.subdir, origin.scope.as_deref()),
+            }
     }
 }
 
@@ -339,6 +348,14 @@ impl Lock {
         }
         for (alias, coverage) in &lock.repositories {
             crate::manifest::validate_name(alias)?;
+            if let Some(scope) = &coverage.subdir
+                && crate::manifest::directory(scope)?.as_ref() != Some(scope)
+            {
+                bail!(
+                    "invalid directory for source `{alias}` in {}",
+                    path.display()
+                );
+            }
             for (name, subdir) in &coverage.members {
                 crate::manifest::validate_name(name)?;
                 if subdir.starts_with('/')
@@ -410,6 +427,7 @@ mod tests {
             Coverage {
                 source: "acme/skills".into(),
                 git_ref: Some("main".into()),
+                subdir: Some("skills".into()),
                 producer: None,
                 members: [("review".into(), "skills/review".into())].into(),
             },
@@ -419,6 +437,7 @@ mod tests {
             Coverage {
                 source: String::new(),
                 git_ref: None,
+                subdir: None,
                 producer: Some(producer("export")),
                 members: [
                     ("a".into(), "a".into()),
@@ -442,7 +461,9 @@ mod tests {
         lock.commands.insert("f".into(), single);
 
         let text = toml::to_string(&lock).unwrap();
-        assert!(text.contains("[sources.team]\nsource = \"acme/skills\"\nref = \"main\""));
+        assert!(text.contains(
+            "[sources.team]\nsource = \"acme/skills\"\nref = \"main\"\nsubdir = \"skills\""
+        ));
         assert!(
             text.contains(&format!("a = \"{}\"", "a".repeat(64))),
             "{text}"

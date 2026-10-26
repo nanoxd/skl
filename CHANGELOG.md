@@ -4,6 +4,26 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- `subdir` on a declared Git source limits wildcard discovery, `skills` lists, and
+  alias references to one directory of the repository, so a repository that ships
+  the same skills in sibling folders (such as one copy per agent) can be tracked as
+  `skills = "*"`. The lock records it with the wildcard's membership.
+- `add` and `discover` accept a tree URL or `--subdir` naming a folder without a
+  `SKILL.md` of its own and treat it as a collection of the skills beneath it.
+  `add --all` on a collection declares one wildcard source scoped to the folder,
+  named after its plugin or folder or `--alias NAME`, and excludes names the
+  manifest already has. `discover` names the plugin the skills belong to and what
+  else it ships.
+
+### Changed
+
+- Name clashes between declarations name both sources and print the `exclude`
+  line that keeps each copy, reporting every name two declarations share at once.
+  Ambiguous names list each copy's directory and suggest the `subdir` or
+  `--subdir` that picks one.
+
 ### Fixed
 
 - Xcode and other app exports no longer intermittently fail with `No such file or

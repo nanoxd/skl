@@ -12,6 +12,7 @@ mod lock;
 mod manifest;
 mod paths;
 mod plan;
+mod plugin;
 mod profile;
 mod repositories;
 mod search;
@@ -127,9 +128,12 @@ enum Command {
         /// Branch, tag or full commit SHA to follow instead of the default branch
         #[arg(long = "ref")]
         git_ref: Option<String>,
-        /// Directory containing the skill within the repository
+        /// Directory containing the skill, or a collection of skills, within the repository
         #[arg(long)]
         subdir: Option<String>,
+        /// Manifest name for the source `--all` declares for a collection
+        #[arg(long, value_name = "NAME")]
+        alias: Option<String>,
         /// Only edit the manifest
         #[arg(long)]
         no_sync: bool,
@@ -468,6 +472,7 @@ fn run(cli: Cli) -> Result<bool> {
             all,
             git_ref,
             subdir,
+            alias,
             no_sync,
         } => {
             let source = source::Source::parse(&source, git_ref.as_deref(), subdir.as_deref())?;
@@ -479,7 +484,15 @@ fn run(cli: Cli) -> Result<bool> {
             } else {
                 None
             };
-            add(&paths, &source, &skills, all, &options, selected_collection)?;
+            add(
+                &paths,
+                &source,
+                &skills,
+                all,
+                &options,
+                selected_collection,
+                alias.as_deref(),
+            )?;
             if no_sync {
                 Ok(true)
             } else {
@@ -628,6 +641,7 @@ fn add(
     options: &SkillOptions,
     // A picker-selected child must not become an alias for the root SKILL.md.
     selected_collection: bool,
+    alias: Option<&str>,
 ) -> Result<()> {
     options.validate(paths)?;
     let source = input.repository.as_str();
@@ -746,14 +760,31 @@ fn add(
     } else {
         let url = manifest::source_url(source)?;
         let git = Git::new(paths.repos());
-        let group = join_group(&declarations, &git, &url, source, git_ref.as_deref())?;
+        let group = join_group(
+            &declarations,
+            &git,
+            &url,
+            source,
+            git_ref.as_deref(),
+            subdir.as_deref(),
+        )?;
         // Without a ref of its own, a member is checked at the ref it will inherit.
         let commit = match group.and_then(|(declaration, _)| declaration.git_ref.as_deref()) {
             Some(inherited) if git_ref.is_none() => git.resolve(&url, Some(inherited))?,
             _ => input.resolve(&git, &url)?,
         };
         let repo = git.ensure_commit(&url, &commit)?;
-        let candidates = git.candidates_in(&repo, &commit, subdir.as_deref())?;
+        // A directory holds one skill or, without a SKILL.md of its own, a collection.
+        // Without one, a declared source's `subdir` limits the lookup.
+        let scope = group.and_then(|(declaration, _)| declaration.subdir.as_deref());
+        let (candidates, collection) = match subdir {
+            Some(dir) => git.lookup(&repo, &commit, Some(dir))?,
+            None => (git.candidates_under(&repo, &commit, scope)?, false),
+        };
+        let under = match subdir.as_deref().or(scope) {
+            Some(dir) if dir != "." => format!(" under `{dir}`"),
+            _ => String::new(),
+        };
         let names: Vec<String> = if all {
             candidates.iter().map(|c| c.name.clone()).collect()
         } else if !skills.is_empty() {
@@ -764,7 +795,7 @@ fn add(
                 {
                     let have: Vec<_> = candidates.iter().map(|c| c.name.as_str()).collect();
                     bail!(
-                        "{source} has no skill named `{name}`; it has {}",
+                        "{source} has no skill named `{name}`{under}; it has {}",
                         have.join(", ")
                     );
                 }
@@ -773,16 +804,17 @@ fn add(
         } else if let [only] = candidates.as_slice() {
             vec![only.name.clone()]
         } else if candidates.is_empty() {
-            bail!("{source} has no SKILL.md");
+            bail!("{source} has no SKILL.md{under}");
         } else {
             let have: Vec<_> = candidates.iter().map(|c| c.name.as_str()).collect();
             bail!(
-                "{source} has {} skills: pick with --skill or use --all\n  {}",
+                "{source} has {} skills{under}: pick with --skill or use --all\n  {}",
                 have.len(),
                 have.join("\n  ")
             );
         };
         // Reject ambiguous names before editing the manifest, including --no-sync.
+        let mut chosen = Vec::with_capacity(names.len());
         for name in &names {
             let by_name: Vec<_> = candidates.iter().filter(|c| &c.name == name).collect();
             let matches = if by_name.is_empty() {
@@ -794,19 +826,39 @@ fn add(
                 by_name
             };
             if matches.len() > 1 {
+                let dirs: Vec<_> = matches.iter().map(|c| c.subdir.as_str()).collect();
                 bail!(
-                    "several skills in {source} match `{name}` ({}): set `subdir` in the manifest",
-                    matches
-                        .iter()
-                        .map(|c| c.subdir.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    "several skills in {source}{under} match `{name}` ({}): choose one collection with --subdir {} or its tree URL",
+                    dirs.join(", "),
+                    git::parents(&dirs).join(" or --subdir ")
                 );
             }
+            chosen.push(matches.first().copied());
         }
-        // A member found by name elsewhere in the repository keeps its directory.
+        let files = git.files(&repo, &commit)?;
+        let dirs: Vec<&str> = chosen.iter().flatten().map(|c| c.subdir.as_str()).collect();
+        // A collection inside one plugin takes the plugin's name.
+        let plugin_name = match plugin::containing(&git, &repo, &commit, &files, &dirs).as_slice() {
+            [only] => Some(only.name.clone()),
+            _ => None,
+        };
+        // `--all` on a collection declares one source that keeps tracking it.
+        if let (true, true, None, Some(dir)) = (all, collection, group, subdir) {
+            add_source(
+                paths,
+                &mut doc,
+                source,
+                git_ref.as_deref(),
+                dir,
+                &names,
+                options,
+                alias.or(plugin_name.as_deref()),
+            )?;
+            return Ok(());
+        }
+        // A member found by name elsewhere in its source keeps its directory.
         let everywhere = match (group, subdir) {
-            (Some(_), Some(_)) => git.candidates(&repo, &commit)?,
+            (Some(_), Some(_)) => git.candidates_under(&repo, &commit, scope)?,
             _ => Vec::new(),
         };
         let all = if subdir.is_some() {
@@ -816,14 +868,20 @@ fn add(
         };
         names
             .into_iter()
-            .map(|name| {
+            .zip(chosen)
+            .map(|(name, candidate)| {
+                // A collection records each skill's own directory.
+                let directory = subdir.as_ref().map(|dir| match candidate {
+                    Some(c) if collection => c.subdir.clone(),
+                    _ => dir.clone(),
+                });
                 if let Some((declaration, own_ref)) = group {
                     let mut table = InlineTable::new();
                     table.insert("source", declaration.alias.as_str().into());
                     if let Some(r) = git_ref.as_deref().filter(|_| own_ref) {
                         table.insert("ref", r.into());
                     }
-                    if let Some(dir) = subdir {
+                    if let Some(dir) = &directory {
                         let exact = if dir == "." { "" } else { dir.as_str() };
                         if !matches!(git::matching(&everywhere, &name)[..], [one] if one.subdir == exact)
                         {
@@ -840,7 +898,7 @@ fn add(
                     };
                     return (name, entry);
                 }
-                let item = match (git_ref, subdir) {
+                let item = match (git_ref, &directory) {
                     (None, None) => value(source),
                     (reference, directory) => {
                         let mut table = InlineTable::new();
@@ -859,6 +917,12 @@ fn add(
             .collect()
     };
 
+    // Only `--all` on a collection directory declares a source, and returns above.
+    if alias.is_some() {
+        bail!(
+            "--alias names the source that --all declares for a collection directory, a folder without a SKILL.md of its own"
+        );
+    }
     let coverage = Lock::load(&paths.lock())?.repositories;
     let mut added = 0;
     for (name, entry) in entries {
@@ -956,13 +1020,15 @@ enum Entry {
 }
 
 /// The source declaration a Git skill joins and whether it needs its own `ref`.
-/// Without `--ref`, the skill inherits the declaration's ref.
+/// Without `--ref`, the skill inherits the declaration's ref. A declaration with a
+/// `subdir` only takes skills from inside it.
 fn join_group<'a>(
     declarations: &'a [repositories::Declaration],
     git: &Git,
     url: &str,
     source: &str,
     git_ref: Option<&str>,
+    subdir: Option<&str>,
 ) -> Result<Option<(&'a repositories::Declaration, bool)>> {
     let matching: Vec<_> = declarations
         .iter()
@@ -970,6 +1036,7 @@ fn join_group<'a>(
             d.source
                 .as_deref()
                 .is_some_and(|declared| repositories::same_repository(declared, source))
+                && subdir.is_none_or(|dir| git::within(dir, d.subdir.as_deref()))
         })
         .collect();
     let Some(&first) = matching.first() else {
@@ -992,6 +1059,123 @@ fn join_group<'a>(
         return Ok(Some((declaration, false)));
     }
     Ok(Some((first, true)))
+}
+
+/// Declares a source that selects every skill in a collection directory, so the
+/// manifest keeps tracking it. Names the manifest already has stay where they are
+/// and are excluded here.
+#[allow(clippy::too_many_arguments)]
+fn add_source(
+    paths: &Paths,
+    doc: &mut DocumentMut,
+    source: &str,
+    git_ref: Option<&str>,
+    dir: &str,
+    names: &[String],
+    options: &SkillOptions,
+    alias: Option<&str>,
+) -> Result<()> {
+    let declarations = repositories::declarations(doc);
+    let alias = match alias {
+        Some(alias) => alias.to_owned(),
+        // The collection's own name, skipping generic folders like `skills`.
+        None => dir
+            .rsplit('/')
+            .find(|part| *part != "skills")
+            .unwrap_or(dir)
+            .to_owned(),
+    };
+    manifest::validate_name(&alias).context("name the source with --alias NAME")?;
+    if declarations.iter().any(|d| d.alias == alias) {
+        bail!("source `{alias}` is already declared; name this one with --alias NAME");
+    }
+    let coverage = Lock::load(&paths.lock())?.repositories;
+    let taken: Vec<&String> = names
+        .iter()
+        .filter(|name| {
+            doc.get("skills").and_then(|s| s.get(name)).is_some()
+                || declarations.iter().any(|d| d.selects(name, &coverage))
+        })
+        .collect();
+    let mut table = Table::new();
+    table.insert("source", value(source));
+    if let Some(reference) = git_ref {
+        table.insert("ref", value(reference));
+    }
+    table.insert("subdir", value(dir));
+    table.insert("skills", value("*"));
+    if !taken.is_empty() {
+        table.insert(
+            "exclude",
+            value(
+                taken
+                    .iter()
+                    .map(|n| n.as_str())
+                    .collect::<toml_edit::Array>(),
+            ),
+        );
+    }
+    for (key, values) in [
+        ("agents", &options.agents),
+        ("os", &options.os),
+        ("profiles", &options.only_profiles),
+    ] {
+        let mut seen = BTreeSet::new();
+        let unique: toml_edit::Array = values
+            .iter()
+            .filter(|v| seen.insert(*v))
+            .map(String::as_str)
+            .collect();
+        if !unique.is_empty() {
+            table.insert(key, value(unique));
+        }
+    }
+    insert_declaration(doc, "sources", &alias, table)?;
+    manifest::parse(&doc.to_string(), paths)?;
+    write_atomic(&paths.manifest(), doc.to_string().as_bytes())?;
+    let count = names.len() - taken.len();
+    println!("Added source `{alias}` with every skill in {dir} ({count} now, and any added later)");
+    if !taken.is_empty() {
+        let taken: Vec<&str> = taken.iter().map(|n| n.as_str()).collect();
+        println!(
+            "= excluded {} from `{alias}`: already in the manifest",
+            taken.join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// Adds `[section.name]` above `[skills]`, as the documentation writes declarations.
+fn insert_declaration(
+    doc: &mut DocumentMut,
+    section: &str,
+    name: &str,
+    mut table: Table,
+) -> Result<()> {
+    if let Some(skills) = doc.get_mut("skills").and_then(Item::as_table_mut)
+        && let Some(position) = skills.position()
+    {
+        table.set_position(Some(position - 1));
+        let prefix = skills
+            .decor()
+            .prefix()
+            .and_then(|p| p.as_str())
+            .unwrap_or("");
+        if !prefix.starts_with('\n') {
+            let prefix = format!("\n{prefix}");
+            skills.decor_mut().set_prefix(prefix);
+        }
+    }
+    let parent = doc.entry(section).or_insert_with(|| {
+        let mut parent = Table::new();
+        parent.set_implicit(true);
+        Item::Table(parent)
+    });
+    parent
+        .as_table_mut()
+        .with_context(|| format!("`{section}` in the manifest must be a table"))?
+        .insert(name, Item::Table(table));
+    Ok(())
 }
 
 /// Inserts an entry the way `cargo add` does: in key order when the table is

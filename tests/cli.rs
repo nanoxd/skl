@@ -5849,3 +5849,423 @@ fn version_two_xcode_locks_keep_working_and_migrate_on_the_next_export() {
     );
     assert!(!env.codex("alpha").exists());
 }
+
+const CLAUDE_PSTACK: &str = "harness/pstack/claude-code/skills";
+
+/// A plugin marketplace shaped like cursor/plugins: one plugin's skills twice, in
+/// sibling subtrees for Cursor and Claude Code, each next to the plugin's agents.
+/// The Cursor copies say `v1` and the Claude Code copies say `claude-code`.
+fn plugins_repo(env: &Env) -> String {
+    let url = env.repo(
+        "plugins",
+        &[
+            ("pstack/skills/poteto-mode", "poteto-mode"),
+            ("pstack/skills/teach", "teach"),
+            (
+                "harness/pstack/claude-code/skills/poteto-mode",
+                "poteto-mode",
+            ),
+            ("harness/pstack/claude-code/skills/teach", "teach"),
+        ],
+    );
+    let dir = env.remote("plugins");
+    for name in ["poteto-mode", "teach"] {
+        write_skill(&dir.join(CLAUDE_PSTACK).join(name), name, "claude-code");
+    }
+    for (path, text) in [
+        ("pstack/.cursor-plugin/plugin.json", r#"{"name": "pstack"}"#),
+        ("pstack/agents/poteto-agent.md", "agent"),
+        (
+            "harness/pstack/claude-code/.claude-plugin/plugin.json",
+            r#"{"name": "pstack"}"#,
+        ),
+        ("harness/pstack/claude-code/agents/poteto-agent.md", "agent"),
+        (
+            ".claude-plugin/marketplace.json",
+            r#"{"name": "fixture-plugins", "plugins": [{"name": "pstack", "source": "./harness/pstack/claude-code"}]}"#,
+        ),
+    ] {
+        let path = dir.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+    commit(&dir, "plugin manifests and agents");
+    url
+}
+
+fn lock_toml(env: &Env) -> toml::Table {
+    fs::read_to_string(env.config("skills.lock"))
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+fn manifest_toml(env: &Env) -> toml::Table {
+    fs::read_to_string(env.config("skills.toml"))
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+#[test]
+fn source_subdir_scopes_wildcard_discovery_to_one_collection() {
+    let env = Env::new();
+    let url = plugins_repo(&env);
+    // Across the whole repository every name appears twice.
+    env.write_manifest(&format!(
+        "[sources.pstack]\nsource = '{url}'\nskills = '*'\n"
+    ));
+    let err = env.fails(&["sync"]);
+    assert!(
+        err.contains("ambiguous repository skill `poteto-mode` and 1 other names"),
+        "{err}"
+    );
+    assert!(
+        err.contains(&format!(
+            "subdir = \"{CLAUDE_PSTACK}\" or subdir = \"pstack/skills\""
+        )),
+        "{err}"
+    );
+    assert!(!env.config("skills.lock").exists());
+
+    let manifest =
+        format!("[sources.pstack]\nsource = '{url}'\nsubdir = '{CLAUDE_PSTACK}/'\nskills = '*'\n");
+    env.write_manifest(&manifest);
+    env.ok(&["sync"]);
+    assert!(body(&env.claude("poteto-mode")).contains("claude-code"));
+    assert!(body(&env.codex("teach")).contains("claude-code"));
+    let lock = lock_toml(&env);
+    assert_eq!(
+        lock["sources"]["pstack"]["subdir"].as_str(),
+        Some(CLAUDE_PSTACK)
+    );
+    assert_eq!(
+        lock["sources"]["pstack"]["members"]["teach"].as_str(),
+        Some(format!("{CLAUDE_PSTACK}/teach").as_str())
+    );
+
+    // New skills join only from inside the collection.
+    let remote = env.remote("plugins");
+    write_skill(
+        &remote.join(CLAUDE_PSTACK).join("verify"),
+        "verify",
+        "claude-code",
+    );
+    write_skill(
+        &remote.join("pstack/skills/cursor-only"),
+        "cursor-only",
+        "v1",
+    );
+    commit(&remote, "new skills");
+    env.ok(&["sync"]);
+    assert!(env.claude("verify").is_symlink());
+    assert!(!env.claude("cursor-only").exists());
+    env.ok(&["sync", "--locked"]);
+
+    // Moving the scope needs fresh coverage, then switches every member.
+    env.write_manifest(&manifest.replace(CLAUDE_PSTACK, "pstack/skills"));
+    assert!(
+        env.fails(&["sync", "--locked"])
+            .contains("coverage is out of date")
+    );
+    env.ok(&["sync"]);
+    assert!(body(&env.claude("poteto-mode")).contains("v1"));
+    assert!(env.claude("cursor-only").is_symlink());
+    assert!(!env.claude("verify").exists());
+    env.ok(&["sync", "--locked"]);
+}
+
+#[test]
+fn source_subdir_scopes_name_lookups_for_lists_and_references() {
+    let env = Env::new();
+    let url = plugins_repo(&env);
+    let manifest = format!(
+        "[sources.pstack]\nsource = '{url}'\nsubdir = '{CLAUDE_PSTACK}'\nskills = ['poteto-mode']\n\n[skills]\nteach = 'pstack'\n"
+    );
+    env.write_manifest(&manifest);
+    env.ok(&["sync"]);
+    assert!(body(&env.claude("poteto-mode")).contains("claude-code"));
+    assert!(body(&env.claude("teach")).contains("claude-code"));
+    env.ok(&["sync", "--locked"]);
+    assert!(env.ok(&["info", "teach"]).contains(&format!(
+        "Subdirectory: auto-discover under {CLAUDE_PSTACK}"
+    )));
+
+    // A new scope looks every name up again.
+    env.write_manifest(&manifest.replace(CLAUDE_PSTACK, "pstack/skills"));
+    assert!(env.fails(&["sync", "--locked"]).contains("out of date"));
+    env.ok(&["sync"]);
+    assert!(body(&env.claude("poteto-mode")).contains("v1"));
+    assert!(body(&env.claude("teach")).contains("v1"));
+
+    // A member's own subdir is a repository path and may leave the scope.
+    env.write_manifest(&format!(
+        "[sources.pstack]\nsource = '{url}'\nsubdir = 'pstack/skills'\nskills = ['poteto-mode']\n\n[skills]\nteach = {{ source = 'pstack', subdir = '{CLAUDE_PSTACK}/teach' }}\n"
+    ));
+    env.ok(&["sync"]);
+    assert!(body(&env.claude("teach")).contains("claude-code"));
+    assert!(body(&env.claude("poteto-mode")).contains("v1"));
+
+    // Lookups never reach outside the scope.
+    env.write_manifest(&format!(
+        "[sources.pstack]\nsource = '{url}'\nsubdir = 'harness'\nskills = ['missing']\n"
+    ));
+    assert!(
+        env.fails(&["sync"])
+            .contains("has no skill named `missing` under `harness`")
+    );
+
+    for (setting, message) in [
+        ("subdir = '../outside'", "inside the repository"),
+        ("subdir = 1", "subdir must be a string"),
+    ] {
+        env.write_manifest(&format!(
+            "[sources.pstack]\nsource = '{url}'\n{setting}\nskills = '*'\n"
+        ));
+        assert!(env.fails(&["sync"]).contains(message), "{setting}");
+    }
+    env.write_manifest(
+        "[sources.tools]\ncommand = ['tool', '{output}']\nsubdir = 'skills'\nskills = '*'\n",
+    );
+    assert!(env.fails(&["sync"]).contains("unknown key `subdir`"));
+}
+
+#[test]
+fn collection_tree_urls_discover_and_add_one_scoped_source() {
+    let env = Env::new();
+    let url = plugins_repo(&env);
+    fs::write(
+        env.home.join(".gitconfig"),
+        format!("[url \"{url}\"]\n insteadOf = https://github.com/acme/plugins\n"),
+    )
+    .unwrap();
+    let tree = "https://github.com/acme/plugins/tree/main";
+
+    // A folder without a SKILL.md of its own lists the skills beneath it.
+    let found = env.ok(&["discover", &format!("{tree}/{CLAUDE_PSTACK}")]);
+    assert!(
+        found.contains(&format!("teach\t{CLAUDE_PSTACK}/teach")),
+        "{found}"
+    );
+    assert!(!found.contains("\tpstack/skills/teach"), "{found}");
+    assert!(
+        found.contains(
+            "Plugin: pstack (harness/pstack/claude-code), also ships agents poteto-agent that skl doesn't install"
+        ),
+        "{found}"
+    );
+    let found = env.ok(&["discover", &format!("{tree}/pstack")]);
+    assert!(found.contains("teach\tpstack/skills/teach"), "{found}");
+    assert!(!found.contains(CLAUDE_PSTACK), "{found}");
+
+    // `teach` already comes from another repository, so the new source leaves it.
+    let other = env.repo("matt", &[("skills/teach", "teach")]);
+    env.write_manifest(&format!("[skills]\nteach = '{other}'\n"));
+    let out = env.skl(&["add", &format!("{tree}/{CLAUDE_PSTACK}"), "--all"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(&format!(
+            "Added source `pstack` with every skill in {CLAUDE_PSTACK}"
+        )),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("= excluded teach from `pstack`"),
+        "{stdout}"
+    );
+    let text = fs::read_to_string(env.config("skills.toml")).unwrap();
+    assert!(
+        text.starts_with(&format!(
+            "[sources.pstack]\nsource = \"https://github.com/acme/plugins\"\nref = \"main\"\nsubdir = \"{CLAUDE_PSTACK}\"\nskills = \"*\"\nexclude = [\"teach\"]\n"
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("[skills]\nteach = '{other}'\n")),
+        "{text}"
+    );
+    assert!(body(&env.claude("poteto-mode")).contains("claude-code"));
+    assert_eq!(
+        lock_toml(&env)["skills"]["teach"]["source"].as_str(),
+        Some(other.as_str())
+    );
+    env.ok(&["sync", "--locked"]);
+
+    // The Cursor copy of the same plugin needs a name of its own.
+    let cursor = format!("{tree}/pstack/skills");
+    assert!(
+        env.fails(&["add", &cursor, "--all", "--no-sync"])
+            .contains("source `pstack` is already declared; name this one with --alias NAME")
+    );
+    env.ok(&[
+        "add",
+        &cursor,
+        "--all",
+        "--alias",
+        "cursor-pstack",
+        "--no-sync",
+    ]);
+    let manifest = manifest_toml(&env);
+    let exclude = manifest["sources"]["cursor-pstack"]["exclude"]
+        .as_array()
+        .unwrap();
+    assert_eq!(exclude.len(), 2, "{exclude:?}");
+    assert!(env.fails(&["add", &url, "--alias", "x"]).contains("--all"));
+    assert!(
+        env.fails(&[
+            "add",
+            &url,
+            "--subdir",
+            "pstack/skills/teach",
+            "--all",
+            "--alias",
+            "x"
+        ])
+        .contains("collection directory")
+    );
+}
+
+#[test]
+fn add_from_duplicated_subtrees_names_the_collections_to_choose() {
+    let env = Env::new();
+    let url = plugins_repo(&env);
+    env.write_manifest("");
+    for args in [
+        vec!["add", &url, "--all", "--no-sync"],
+        vec!["add", &url, "-s", "teach", "--no-sync"],
+    ] {
+        let err = env.fails(&args);
+        assert!(
+            err.contains(&format!(
+                "choose one collection with --subdir {CLAUDE_PSTACK} or --subdir pstack/skills"
+            )),
+            "{err}"
+        );
+    }
+    assert_eq!(fs::read_to_string(env.config("skills.toml")).unwrap(), "");
+
+    // Named skills from a collection record their own directories.
+    env.ok(&["add", &url, "--subdir", "pstack/skills", "-s", "teach"]);
+    assert_eq!(
+        manifest_toml(&env)["skills"]["teach"]["subdir"].as_str(),
+        Some("pstack/skills/teach")
+    );
+    assert!(body(&env.claude("teach")).contains("v1"));
+    assert!(!env.claude("poteto-mode").exists());
+}
+
+#[test]
+fn add_joins_a_scoped_source_by_looking_inside_its_subdir() {
+    let env = Env::new();
+    let url = plugins_repo(&env);
+    env.write_manifest(&format!(
+        "[sources.pstack]\nsource = '{url}'\nsubdir = '{CLAUDE_PSTACK}'\nskills = []\n"
+    ));
+    // By name alone the repository is ambiguous, but the source's subdir is not.
+    let out = env.ok(&["add", &url, "-s", "poteto-mode"]);
+    assert!(
+        out.contains("Added poteto-mode to source `pstack`"),
+        "{out}"
+    );
+    let manifest = manifest_toml(&env);
+    assert_eq!(
+        manifest["sources"]["pstack"]["skills"],
+        toml::Value::Array(vec!["poteto-mode".into()])
+    );
+    assert!(manifest.get("skills").is_none());
+    assert!(body(&env.claude("poteto-mode")).contains("claude-code"));
+
+    // A skill outside the scope doesn't join it.
+    env.ok(&["add", &url, "--subdir", "pstack/skills/teach"]);
+    let manifest = manifest_toml(&env);
+    assert_eq!(
+        manifest["skills"]["teach"]["source"].as_str(),
+        Some(url.as_str())
+    );
+    assert_eq!(
+        manifest["skills"]["teach"]["subdir"].as_str(),
+        Some("pstack/skills/teach")
+    );
+    assert!(body(&env.claude("teach")).contains("v1"));
+}
+
+#[test]
+fn name_clashes_name_both_sources_and_the_exclude_that_resolves_them() {
+    let env = Env::new();
+    let url = plugins_repo(&env);
+    let matt = env.repo("matt", &[("skills/teach", "teach"), ("skills/tdd", "tdd")]);
+    let remote = env.remote("plugins");
+    write_skill(
+        &remote.join(CLAUDE_PSTACK).join("tdd"),
+        "tdd",
+        "claude-code",
+    );
+    commit(&remote, "tdd");
+    let pstack =
+        format!("[sources.pstack]\nsource = '{url}'\nsubdir = '{CLAUDE_PSTACK}'\nskills = '*'\n");
+
+    // Two wildcards: every shared name in one message, with both ways out.
+    env.write_manifest(&format!(
+        "{pstack}[sources.matt]\nsource = '{matt}'\nskills = '*'\n"
+    ));
+    let err = env.fails(&["sync"]);
+    assert!(
+        err.contains(&format!(
+            "skills `tdd`, `teach` from source `pstack` ({url}) conflict with another declaration, source `matt` ({matt})"
+        )),
+        "{err}"
+    );
+    assert!(
+        err.contains("keep source `matt`'s: add exclude = [\"tdd\", \"teach\"] to source `pstack`"),
+        "{err}"
+    );
+    assert!(
+        err.contains("keep source `pstack`'s: add exclude = [\"tdd\", \"teach\"] to source `matt`"),
+        "{err}"
+    );
+    assert!(!env.config("skills.lock").exists());
+
+    // A wildcard against an explicit entry.
+    env.write_manifest(&format!("{pstack}[skills]\nteach = '{matt}'\n"));
+    let err = env.fails(&["sync"]);
+    assert!(
+        err.contains(&format!(
+            "skill `teach` from source `pstack` ({url}) conflicts with another declaration, the `[skills]` entry ({matt})"
+        )),
+        "{err}"
+    );
+    assert!(
+        err.contains("keep the `[skills]` entry's: add exclude = [\"teach\"] to source `pstack`"),
+        "{err}"
+    );
+    assert!(err.contains("as in teach = \"pstack\""), "{err}");
+
+    // Two lists naming the same skill.
+    env.write_manifest(&format!(
+        "[sources.a]\nsource = '{url}'\nsubdir = '{CLAUDE_PSTACK}'\nskills = ['teach']\n[sources.b]\nsource = '{matt}'\nskills = ['teach']\n"
+    ));
+    assert!(
+        env.fails(&["sync"])
+            .contains("source `b` skill `teach` conflicts with another declaration, source `a`")
+    );
+
+    // The suggested line resolves the clash, and an existing list grows.
+    env.write_manifest(&format!(
+        "{pstack}exclude = ['tdd']\n[skills]\nteach = '{matt}'\n"
+    ));
+    assert!(
+        env.fails(&["sync"])
+            .contains("add \"teach\" to the exclude list of source `pstack`")
+    );
+    env.write_manifest(&format!(
+        "{pstack}exclude = ['tdd', 'teach']\n[skills]\nteach = '{matt}'\n"
+    ));
+    env.ok(&["sync"]);
+    assert_eq!(
+        lock_toml(&env)["skills"]["teach"]["source"].as_str(),
+        Some(matt.as_str())
+    );
+    assert!(body(&env.claude("poteto-mode")).contains("claude-code"));
+    assert!(!env.claude("tdd").exists());
+}

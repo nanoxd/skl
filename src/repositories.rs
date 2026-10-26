@@ -15,7 +15,10 @@ use crate::paths::Paths;
 pub const TABLES: [&str; 2] = ["sources", "repositories"];
 
 pub struct Repository {
+    alias: String,
     defaults: Table,
+    /// The `subdir` that discovery and name lookups stay beneath.
+    scope: Option<String>,
     overrides: BTreeSet<String>,
     excluded: BTreeSet<String>,
 }
@@ -27,6 +30,9 @@ pub struct Coverage {
     pub source: String,
     #[serde(rename = "ref", default, skip_serializing_if = "Option::is_none")]
     pub git_ref: Option<String>,
+    /// The directory discovery was limited to, if the source sets `subdir`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subdir: Option<String>,
     /// The command whose export an app source's coverage came from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub producer: Option<crate::manifest::CommandOrigin>,
@@ -36,7 +42,13 @@ pub struct Coverage {
 
 impl Repository {
     pub fn skill(&self, name: &str, agents: &[Agent], paths: &Paths) -> Result<Skill> {
-        manifest::parse_skill(name, Value::Table(self.defaults.clone()), agents, paths)
+        let mut skill =
+            manifest::parse_skill(name, Value::Table(self.defaults.clone()), agents, paths)?;
+        skill.group = Some(self.alias.clone());
+        if let Origin::Git(origin) = &mut skill.origin {
+            origin.scope = self.scope.clone();
+        }
+        Ok(skill)
     }
 }
 
@@ -46,6 +58,8 @@ pub struct Declaration {
     /// The Git source, or None for an app source.
     pub source: Option<String>,
     pub git_ref: Option<String>,
+    /// The directory a Git source's lookups stay beneath.
+    pub subdir: Option<String>,
     /// The export command of an app source.
     pub producer: Option<crate::manifest::CommandOrigin>,
     pub selection: Selection,
@@ -80,7 +94,11 @@ impl Declaration {
         coverage.get(&self.alias).is_some_and(|c| {
             let current = match &self.producer {
                 Some(producer) => c.source.is_empty() && c.producer.as_ref() == Some(producer),
-                None => self.source.as_ref() == Some(&c.source) && c.git_ref == self.git_ref,
+                None => {
+                    self.source.as_ref() == Some(&c.source)
+                        && c.git_ref == self.git_ref
+                        && c.subdir == self.subdir
+                }
             };
             current && c.members.contains_key(name)
         })
@@ -197,6 +215,10 @@ pub fn declarations(doc: &toml_edit::DocumentMut) -> Vec<Declaration> {
                     .get("ref")
                     .and_then(toml_edit::Item::as_str)
                     .map(str::to_owned),
+                subdir: group
+                    .get("subdir")
+                    .and_then(toml_edit::Item::as_str)
+                    .and_then(|dir| manifest::directory(dir).ok().flatten()),
                 producer,
                 selection,
                 defaults,
@@ -370,13 +392,16 @@ pub fn remove_name(array: &mut toml_edit::Array, name: &str) -> bool {
     removed
 }
 
+/// Each `[skills]` entry a declared Git source provides, with that source's alias
+/// and lookup scope.
+pub type Members = BTreeMap<String, (String, Option<String>)>;
+
+/// Wildcard Git sources, app sources, and the members of the other Git sources.
+pub type Declared = (BTreeMap<String, Repository>, BTreeMap<String, App>, Members);
+
 /// Expand selected lists and alias references before normal skill validation.
 /// Wildcard groups are expanded later from discovery or lock coverage.
-pub fn parse(
-    table: &mut Table,
-    agents: &[Agent],
-    paths: &Paths,
-) -> Result<(BTreeMap<String, Repository>, BTreeMap<String, App>)> {
+pub fn parse(table: &mut Table, agents: &[Agent], paths: &Paths) -> Result<Declared> {
     let mut declarations = Table::new();
     for key in TABLES {
         match table.remove(key) {
@@ -451,12 +476,21 @@ pub fn parse(
         if !defaults.contains_key("source") {
             bail!("source `{alias}` requires source, command or app")
         }
+        // A source's `subdir` scopes its lookups. A member's own `subdir` still
+        // names the exact directory of its SKILL.md.
+        let scope = match defaults.remove("subdir") {
+            None => None,
+            Some(Value::String(dir)) => {
+                manifest::directory(&dir).with_context(|| format!("source `{alias}`"))?
+            }
+            Some(_) => bail!("source `{alias}` subdir must be a string"),
+        };
         if defaults
             .keys()
             .any(|k| !matches!(k.as_str(), "source" | "ref" | "agents" | "profiles" | "os"))
         {
             bail!(
-                "source `{alias}` only supports source, ref, skills, exclude, agents, profiles, and os"
+                "source `{alias}` only supports source, ref, subdir, skills, exclude, agents, profiles, and os"
             );
         }
         let skill = manifest::parse_skill(&alias, Value::Table(defaults.clone()), agents, paths)?;
@@ -465,15 +499,18 @@ pub fn parse(
         }
         selections.insert(alias.clone(), selection);
         groups.insert(
-            alias,
+            alias.clone(),
             Repository {
+                alias,
                 defaults,
+                scope,
                 overrides: BTreeSet::new(),
                 excluded,
             },
         );
     }
     let mut members = Vec::new();
+    let mut provided = Members::new();
     for (name, value) in &mut skills {
         let alias = match &*value {
             Value::String(alias) if manifest::validate_name(alias).is_ok() => alias.clone(),
@@ -516,6 +553,7 @@ pub fn parse(
         merged.extend(options.clone());
         *options = merged;
         group.overrides.insert(name.clone());
+        provided.insert(name.clone(), (alias, group.scope.clone()));
     }
     for (alias, selection) in &selections {
         if let Some(names) = selection {
@@ -528,10 +566,15 @@ pub fn parse(
                     .insert(name.clone(), Value::Table(group.defaults.clone()))
                     .is_some()
                 {
+                    let other = match provided.get(name) {
+                        Some((other, _)) => format!("source `{other}`"),
+                        None => "the `[skills]` entry".into(),
+                    };
                     bail!(
-                        "source `{alias}` skill `{name}` conflicts with another declaration; use source = \"{alias}\" for an override"
+                        "source `{alias}` skill `{name}` conflicts with another declaration, {other}; keep one, or write {name} = {{ source = \"{alias}\", ... }} to customize this source's copy"
                     );
                 }
+                provided.insert(name.clone(), (alias.clone(), group.scope.clone()));
             }
         }
     }
@@ -541,7 +584,7 @@ pub fn parse(
     }
     table.insert("skills".into(), Value::Table(skills));
     groups.retain(|alias, _| selections[alias].is_none());
-    Ok((groups, apps))
+    Ok((groups, apps, provided))
 }
 
 /// An app source: `command` exports skills into `{output}`, or `app` names an
@@ -653,28 +696,185 @@ pub fn discover(
     };
     let commit = git.resolve(&origin.url, origin.git_ref.as_deref())?;
     let repo = git.ensure_commit(&origin.url, &commit)?;
-    let mut members = BTreeMap::new();
-    for candidate in git.candidates(&repo, &commit)? {
+    let mut found: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for candidate in git.candidates_under(&repo, &commit, origin.scope.as_deref())? {
         manifest::validate_name(&candidate.name)?;
-        if members
-            .insert(candidate.name.clone(), candidate.subdir)
-            .is_some()
-        {
-            bail!(
-                "ambiguous repository skill `{}`; select explicit skills with subdir instead of wildcard",
-                candidate.name
-            );
-        }
+        found
+            .entry(candidate.name)
+            .or_default()
+            .push(candidate.subdir);
     }
+    let duplicates: Vec<_> = found.iter().filter(|(_, dirs)| dirs.len() > 1).collect();
+    if let Some((name, dirs)) = duplicates.first() {
+        let dirs: Vec<&str> = dirs.iter().map(String::as_str).collect();
+        let others = match duplicates.len() {
+            1 => String::new(),
+            n => format!(" and {} other names", n - 1),
+        };
+        let within = match &origin.scope {
+            Some(scope) => format!(" under `{scope}`"),
+            None => String::new(),
+        };
+        let hint = crate::git::parents(&dirs)
+            .iter()
+            .map(|dir| format!("subdir = \"{dir}\""))
+            .collect::<Vec<_>>()
+            .join(" or ");
+        bail!(
+            "ambiguous repository skill `{name}`{others}{within}: {}; limit source `{}` to one collection with {hint}, or select explicit skills with subdir instead of a wildcard",
+            dirs.join(", "),
+            group.alias,
+        );
+    }
+    let members = found
+        .into_iter()
+        .map(|(name, mut dirs)| (name, dirs.remove(0)))
+        .collect();
     Ok((
         Coverage {
             source: origin.source,
             git_ref: origin.git_ref,
+            subdir: origin.scope,
             producer: None,
             members,
         },
         commit,
     ))
+}
+
+/// Explains names that two declarations both provide, with the change that keeps
+/// each copy. `location` describes where source `alias` gets its skills, and
+/// `other` is one of the skills it collides with.
+pub fn conflict(
+    paths: &Paths,
+    manifest: &Manifest,
+    alias: &str,
+    location: Option<&str>,
+    names: &[String],
+    other: &Skill,
+) -> anyhow::Error {
+    // Whether a source selects with "*", and whether it already has an exclude list.
+    let wildcard = |alias: &str| -> Option<bool> {
+        if let Some(group) = manifest.repositories.get(alias) {
+            return Some(!group.excluded.is_empty());
+        }
+        let app = manifest.apps.get(alias)?;
+        app.skills.is_none().then_some(!app.exclude.is_empty())
+    };
+    let quoted: Vec<String> = names.iter().map(|n| format!("\"{n}\"")).collect();
+    let quoted = quoted.join(", ");
+    let exclude = |alias: &str, existing: bool| {
+        if existing {
+            format!("add {quoted} to the exclude list of source `{alias}`")
+        } else {
+            format!("add exclude = [{quoted}] to source `{alias}`")
+        }
+    };
+    let listed = names
+        .iter()
+        .map(|n| format!("`{n}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let this = match location {
+        Some(location) => format!("source `{alias}` ({location})"),
+        None => format!("source `{alias}`"),
+    };
+    let other_location = match &other.origin {
+        Origin::Git(origin) => Some(origin.source.clone()),
+        Origin::Command(origin) => Some(origin.command[0].clone()),
+        Origin::Local(dir) | Origin::OptionalLocal(dir) if other.group.is_none() => {
+            Some(paths.tilde(dir))
+        }
+        _ => None,
+    };
+    let other_name = match &other.group {
+        Some(group) => format!("source `{group}`"),
+        None if names.len() == 1 => "the `[skills]` entry".into(),
+        None => "`[skills]` entries".into(),
+    };
+    let that = match other_location {
+        Some(location) if other.group.is_some() || names.len() == 1 => {
+            format!("{other_name} ({location})")
+        }
+        _ => other_name.clone(),
+    };
+    let mut ways = Vec::new();
+    match wildcard(alias) {
+        Some(existing) => ways.push(format!("keep {other_name}'s: {}", exclude(alias, existing))),
+        None => ways.push(format!(
+            "keep {other_name}'s: remove {listed} from source `{alias}`"
+        )),
+    }
+    match &other.group {
+        Some(group) => match wildcard(group) {
+            Some(existing) => ways.push(format!(
+                "keep source `{alias}`'s: {}",
+                exclude(group, existing)
+            )),
+            None => ways.push(format!(
+                "keep source `{alias}`'s: remove {listed} from source `{group}`"
+            )),
+        },
+        None => ways.push(format!(
+            "keep source `{alias}`'s: make each `[skills]` entry name the source instead, as in {} = \"{alias}\"",
+            names[0]
+        )),
+    }
+    let (noun, verb) = if names.len() == 1 {
+        ("skill", "conflicts")
+    } else {
+        ("skills", "conflict")
+    };
+    anyhow::anyhow!(
+        "{noun} {listed} from {this} {verb} with another declaration, {that}. Keep one copy:\n  {}",
+        ways.join("\n  ")
+    )
+}
+
+/// A skill name that a declared source shares with another declaration.
+pub struct Clash<'a> {
+    pub alias: String,
+    /// Where the source gets its skills, such as its Git repository.
+    pub location: Option<String>,
+    pub name: String,
+    pub other: &'a Skill,
+}
+
+/// Reports every name that a declared source shares with others, one message for
+/// each pair of declarations.
+pub fn conflicts(paths: &Paths, manifest: &Manifest, found: Vec<Clash>) -> Result<()> {
+    // One entry per pair, keeping the first clash to describe the other side.
+    let mut pairs: Vec<(Clash, Vec<String>)> = Vec::new();
+    for clash in found {
+        let pair = pairs.iter_mut().find(|(first, _)| {
+            first.alias == clash.alias && first.other.group == clash.other.group
+        });
+        match pair {
+            Some((_, names)) => names.push(clash.name),
+            None => {
+                let names = vec![clash.name.clone()];
+                pairs.push((clash, names));
+            }
+        }
+    }
+    if pairs.is_empty() {
+        return Ok(());
+    }
+    let messages: Vec<String> = pairs
+        .iter()
+        .map(|(clash, names)| {
+            conflict(
+                paths,
+                manifest,
+                &clash.alias,
+                clash.location.as_deref(),
+                names,
+                clash.other,
+            )
+            .to_string()
+        })
+        .collect();
+    bail!("{}", messages.join("\n"))
 }
 
 pub fn matches(
@@ -687,7 +887,9 @@ pub fn matches(
     let Origin::Git(origin) = skill.origin else {
         unreachable!()
     };
-    Ok(origin.source == coverage.source && origin.git_ref == coverage.git_ref)
+    Ok(origin.source == coverage.source
+        && origin.git_ref == coverage.git_ref
+        && origin.scope == coverage.subdir)
 }
 
 pub fn append(
@@ -695,6 +897,7 @@ pub fn append(
     manifest: &mut Manifest,
     coverage: &BTreeMap<String, Coverage>,
 ) -> Result<()> {
+    let mut members = Vec::new();
     for (alias, group) in &manifest.repositories {
         let Some(coverage) = coverage.get(alias) else {
             continue;
@@ -703,19 +906,37 @@ pub fn append(
             if group.overrides.contains(name) || group.excluded.contains(name) {
                 continue;
             }
-            if manifest.skills.iter().any(|skill| skill.name == *name) {
-                bail!(
-                    "source `{alias}` skill `{name}` conflicts with another declaration; use source = \"{alias}\" for an override"
-                );
-            }
             let mut skill = group.skill(name, &manifest.agents, paths)?;
             let Origin::Git(origin) = &mut skill.origin else {
                 unreachable!()
             };
             origin.subdir = Some(subdir.clone());
-            manifest.skills.push(skill);
+            members.push(skill);
         }
     }
+    // Wildcards can collide with explicit entries and with each other.
+    let mut clashes = Vec::new();
+    for (index, skill) in members.iter().enumerate() {
+        let Some(other) = manifest
+            .skills
+            .iter()
+            .chain(&members[..index])
+            .find(|s| s.name == skill.name)
+        else {
+            continue;
+        };
+        let Origin::Git(origin) = &skill.origin else {
+            unreachable!()
+        };
+        clashes.push(Clash {
+            alias: skill.group.clone().expect("a wildcard member has a source"),
+            location: Some(origin.source.clone()),
+            name: skill.name.clone(),
+            other,
+        });
+    }
+    conflicts(paths, manifest, clashes)?;
+    manifest.skills.extend(members);
     Ok(())
 }
 
