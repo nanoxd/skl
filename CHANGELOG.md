@@ -27,6 +27,9 @@ All notable changes to this project are documented here.
 - `add` warns when the skills it installs come from a plugin that also ships
   agents, commands, or hooks, and prints the `skl add --plugin` command that
   installs the whole plugin.
+- Saved update plans cover plugins: `update --plan` pins each plugin's commit and
+  includes the full diff of every folder an agent installs, without running an
+  agent CLI. A plan with plugins is version 4, so an older skl refuses it.
 
 ### Changed
 

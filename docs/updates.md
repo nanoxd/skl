@@ -57,6 +57,9 @@ still reconcile the entire manifest, as ordinary `update` does: missing or stale
 lock entries are included in the plan, and local skills and links are reconciled.
 Wildcard source membership is recorded alongside its exact pins. Apply does
 not rediscover membership or accept later additions, removals, or branch changes.
+[Plugins](plugins.md) are pinned the same way, with the full diff of each folder an
+agent installs. Planning runs no agent CLI; applying installs through them as a
+normal update does.
 
 Planning with an enabled Xcode source runs its export in disposable staging
 and embeds the normalized files, permissions, version, and content hashes in the
@@ -67,10 +70,11 @@ available and intact to review changes or removals; otherwise planning fails.
 Disabled sources and unrelated selected updates do not invoke the exporter.
 Local skill content is not snapshotted. Plans reject command imports and app
 sources with their own `command`, since an arbitrary command cannot promise
-a side-effect-free preview. They don't cover [plugins](plugins.md) yet.
+a side-effect-free preview.
 
-Plans now use format version 3. Regenerate older plans; incompatible versions are
-rejected explicitly. Xcode payloads can make plans substantially larger than Git
+Plans now use format version 3, or 4 when they carry plugins, so an older skl
+rejects them rather than dropping the plugins. Regenerate older plans;
+incompatible versions are rejected explicitly. Xcode payloads can make plans substantially larger than Git
 only plans.
 
 A failed planning run writes no plan. Apply uses the normal ownership checks and
