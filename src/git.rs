@@ -14,6 +14,7 @@ pub struct Git {
 }
 
 /// A directory in a repo that holds a SKILL.md.
+#[derive(Clone)]
 pub struct Candidate {
     pub subdir: String,
     /// The `name` from SKILL.md's frontmatter, falling back to the directory name.
@@ -34,6 +35,34 @@ pub fn matching<'a>(candidates: &'a [Candidate], name: &str) -> Vec<&'a Candidat
         return by_dir;
     }
     candidates.iter().collect()
+}
+
+/// Whether repository directory `dir` is `scope` or inside it. No scope is the
+/// whole repository.
+pub fn within(dir: &str, scope: Option<&str>) -> bool {
+    match scope {
+        None => true,
+        Some(scope) => {
+            dir == scope
+                || dir
+                    .strip_prefix(scope)
+                    .is_some_and(|rest| rest.starts_with('/'))
+        }
+    }
+}
+
+/// The directories holding duplicate names, as a hint toward the `subdir` that
+/// keeps one copy: each skill's parent directory.
+pub fn parents(dirs: &[&str]) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    dirs.iter()
+        .map(|dir| {
+            dir.rsplit_once('/')
+                .map_or(".", |(parent, _)| parent)
+                .to_owned()
+        })
+        .filter(|parent| seen.insert(parent.clone()))
+        .collect()
 }
 
 impl Git {
@@ -174,29 +203,82 @@ impl Git {
     }
 
     pub fn candidates(&self, repo: &Path, commit: &str) -> Result<Vec<Candidate>> {
-        self.candidates_in(repo, commit, None)
+        self.collect(repo, commit, |_| true)
     }
 
+    /// The skill in exactly `selected`, or every skill when unset.
     pub fn candidates_in(
         &self,
         repo: &Path,
         commit: &str,
         selected: Option<&str>,
     ) -> Result<Vec<Candidate>> {
+        let Some(directory) = selected else {
+            return self.candidates(repo, commit);
+        };
+        let directory = if directory == "." { "" } else { directory };
+        self.collect(repo, commit, |subdir| subdir == directory)
+    }
+
+    /// Every skill at or beneath `scope`, or in the whole repository when unset.
+    pub fn candidates_under(
+        &self,
+        repo: &Path,
+        commit: &str,
+        scope: Option<&str>,
+    ) -> Result<Vec<Candidate>> {
+        self.collect(repo, commit, |subdir| within(subdir, scope))
+    }
+
+    /// The skill in `directory`, or the collection of skills beneath it when it has
+    /// no SKILL.md of its own. The flag reports a collection.
+    pub fn lookup(
+        &self,
+        repo: &Path,
+        commit: &str,
+        directory: Option<&str>,
+    ) -> Result<(Vec<Candidate>, bool)> {
+        let exact = self.candidates_in(repo, commit, directory)?;
+        match directory {
+            Some(dir) if exact.is_empty() && dir != "." => {
+                Ok((self.candidates_under(repo, commit, Some(dir))?, true))
+            }
+            _ => Ok((exact, false)),
+        }
+    }
+
+    /// Regular files in a commit, as repository paths.
+    pub fn files(&self, repo: &Path, commit: &str) -> Result<Vec<String>> {
         let files = run(git()
             .arg("-C")
             .arg(repo)
             .args(["ls-tree", "-r", "-z", commit]))?;
+        // `<mode> <type> <sha>\t<path>`. Only regular files count, so a symlinked
+        // SKILL.md that might point anywhere is never taken for a skill.
+        Ok(files
+            .split('\0')
+            .filter_map(|entry| entry.split_once('\t'))
+            .filter(|(meta, _)| meta.starts_with("100"))
+            .map(|(_, file)| file.to_owned())
+            .collect())
+    }
+
+    /// The contents of one file in a commit.
+    pub fn read(&self, repo: &Path, commit: &str, file: &str) -> Result<String> {
+        run(git()
+            .arg("-C")
+            .arg(repo)
+            .args(["cat-file", "-p", &format!("{commit}:{file}")]))
+    }
+
+    fn collect(
+        &self,
+        repo: &Path,
+        commit: &str,
+        keep: impl Fn(&str) -> bool,
+    ) -> Result<Vec<Candidate>> {
         let mut found = Vec::new();
-        for entry in files.split('\0') {
-            // `<mode> <type> <sha>\t<path>`. Only regular files count, so a symlinked
-            // SKILL.md that might point anywhere is never taken for a skill.
-            let Some((meta, file)) = entry.split_once('\t') else {
-                continue;
-            };
-            if !meta.starts_with("100") {
-                continue;
-            }
+        for file in self.files(repo, commit)? {
             let subdir = if file == "SKILL.md" {
                 ""
             } else if let Some(dir) = file.strip_suffix("/SKILL.md") {
@@ -204,16 +286,10 @@ impl Git {
             } else {
                 continue;
             };
-            if selected
-                .is_some_and(|directory| (if directory == "." { "" } else { directory }) != subdir)
-            {
+            if !keep(subdir) {
                 continue;
             }
-            let text = run(git().arg("-C").arg(repo).args([
-                "cat-file",
-                "-p",
-                &format!("{commit}:{file}"),
-            ]))?;
+            let text = self.read(repo, commit, &file)?;
             let dir_name = match subdir.rsplit('/').next() {
                 Some(name) if !name.is_empty() => name.to_string(),
                 _ => repo_name(repo),

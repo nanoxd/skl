@@ -36,3 +36,10 @@ skill-creator = { source = "anthropics/skills", subdir = "skills/skill-creator" 
 # ref = "main"
 # skills = ["review", "testing"]
 # profiles = ["work"]
+
+# Track every skill in one folder of a repository, leaving out names you get elsewhere.
+# [sources.pstack]
+# source = "cursor/plugins"
+# subdir = "harness/pstack/claude-code/skills"
+# skills = "*"
+# exclude = ["teach"]

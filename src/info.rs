@@ -25,6 +25,9 @@ pub struct Report {
     pub source: Option<String>,
     pub git_ref: Option<String>,
     pub subdir: Option<String>,
+    /// The declared source's `subdir` that name lookups stay beneath.
+    #[serde(skip)]
+    pub scope: Option<String>,
     pub locked: Option<crate::lock::LockedSkill>,
     pub lock_matches: bool,
     pub command: Option<crate::lock::CommandSkill>,
@@ -152,6 +155,7 @@ pub(crate) fn collect_loaded(
         source: None,
         git_ref: None,
         subdir: None,
+        scope: None,
         locked: None,
         lock_matches: false,
         command: None,
@@ -222,6 +226,7 @@ pub(crate) fn collect_loaded(
                     report.source = Some(origin.source.clone());
                     report.git_ref = origin.git_ref.clone();
                     report.subdir = origin.subdir.clone();
+                    report.scope = origin.scope.clone();
                     report.locked = lock.skills.get(name).cloned();
                     if let Some(entry) = &report.locked {
                         report.lock_matches = entry.matches(origin);
@@ -294,10 +299,14 @@ impl Report {
             println!("Source: {source}");
         }
         if self.origin == "git" {
+            let subdir = match (&self.subdir, &self.scope) {
+                (Some(subdir), _) => subdir.clone(),
+                (None, Some(scope)) => format!("auto-discover under {scope}"),
+                (None, None) => "auto-discover".into(),
+            };
             println!(
-                "Ref: {}\nSubdirectory: {}",
+                "Ref: {}\nSubdirectory: {subdir}",
                 self.git_ref.as_deref().unwrap_or("default branch"),
-                self.subdir.as_deref().unwrap_or("auto-discover")
             );
             if let Some(entry) = &self.locked {
                 println!(

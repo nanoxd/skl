@@ -45,7 +45,7 @@ pub fn select(
             let url = manifest::source_url(&source.repository)?;
             let commit = source.resolve(&git, &url)?;
             let repo = git.ensure_commit(&url, &commit)?;
-            git.candidates_in(&repo, &commit, source.subdir.as_deref())?
+            git.lookup(&repo, &commit, source.subdir.as_deref())?.0
         };
         if candidates.is_empty() {
             bail!("{} has no SKILL.md", source.repository);

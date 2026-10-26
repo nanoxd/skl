@@ -327,7 +327,7 @@ fn run_inner(
                     alias,
                     app,
                     &members,
-                    &manifest.skills,
+                    &manifest,
                     opts.update.as_ref(),
                 )?;
                 if planning {
@@ -840,7 +840,17 @@ fn locate(
             .map_err(|e| format!("{e:#}"))?;
         cache.insert(key.clone(), found);
     }
-    let candidates = &cache[&key];
+    // A declared source's `subdir` limits name lookups to its collection.
+    let candidates: Vec<git::Candidate> = cache[&key]
+        .iter()
+        .filter(|c| git::within(&c.subdir, origin.scope.as_deref()))
+        .cloned()
+        .collect();
+    let candidates = &candidates;
+    let under = match &origin.scope {
+        Some(scope) => format!(" under `{scope}`"),
+        None => String::new(),
+    };
 
     let subdir = if let Some(dir) = &origin.subdir {
         if git
@@ -855,12 +865,12 @@ fn locate(
         match crate::git::matching(candidates, name).as_slice() {
             [one] => one.subdir.clone(),
             [] if candidates.is_empty() => {
-                return Err(format!("{} has no SKILL.md", origin.source));
+                return Err(format!("{} has no SKILL.md{under}", origin.source));
             }
             [] => {
                 let names: Vec<_> = candidates.iter().map(|c| c.name.as_str()).collect();
                 return Err(format!(
-                    "{} has no skill named `{name}`; it has {}",
+                    "{} has no skill named `{name}`{under}; it has {}",
                     origin.source,
                     names.join(", ")
                 ));
@@ -868,9 +878,10 @@ fn locate(
             matches => {
                 let dirs: Vec<_> = matches.iter().map(|c| c.subdir.as_str()).collect();
                 return Err(format!(
-                    "several skills in {} match `{name}` ({}): set `subdir`",
+                    "several skills in {} match `{name}` ({}): set `subdir` to the skill's directory, or set `subdir` on its declared source to one of {}",
                     origin.source,
-                    dirs.join(", ")
+                    dirs.join(", "),
+                    git::parents(&dirs).join(", ")
                 ));
             }
         }
@@ -896,6 +907,26 @@ pub(crate) fn store_name(subdir: &str) -> String {
 }
 
 fn unpack_skill(git: &Git, repo: &Path, commit: &str, subdir: &str, dest: &Path) -> Result<()> {
+    unpack_tree(git, repo, commit, subdir, dest, |tmp| {
+        // Never publish a tree an agent can't read: SKILL.md must be a real file.
+        let skill = tmp.join("SKILL.md");
+        if !fs::symlink_metadata(&skill).is_ok_and(|m| m.is_file()) || fs::read(&skill).is_err() {
+            bail!("SKILL.md at {} is not a readable file", short(commit));
+        }
+        Ok(())
+    })
+}
+
+/// Unpacks one directory of a commit into the store through a temporary directory,
+/// publishing it only once `check` accepts it.
+pub(crate) fn unpack_tree(
+    git: &Git,
+    repo: &Path,
+    commit: &str,
+    subdir: &str,
+    dest: &Path,
+    check: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
     let parent = dest.parent().expect("store paths have a parent");
     fs::create_dir_all(parent)?;
     let name = dest
@@ -907,11 +938,7 @@ fn unpack_skill(git: &Git, repo: &Path, commit: &str, subdir: &str, dest: &Path)
         fs::remove_dir_all(&tmp)?;
     }
     let result = git.export(repo, commit, subdir, &tmp).and_then(|_| {
-        // Never publish a tree an agent can't read: SKILL.md must be a real file.
-        let skill = tmp.join("SKILL.md");
-        if !fs::symlink_metadata(&skill).is_ok_and(|m| m.is_file()) || fs::read(&skill).is_err() {
-            bail!("SKILL.md at {} is not a readable file", short(commit));
-        }
+        check(&tmp)?;
         Ok(fs::rename(&tmp, dest)?)
     });
     if result.is_err() {

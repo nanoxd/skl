@@ -10,13 +10,34 @@ pub fn run(source: &str, git_ref: Option<&str>) -> Result<bool> {
     let git = Git::new(temporary.path().join("repos"));
     let commit = source.resolve(&git, &url)?;
     let repo = git.ensure_commit(&url, &commit)?;
-    let mut candidates = git.candidates_in(&repo, &commit, source.subdir.as_deref())?;
+    // A tree URL can name one skill or a collection folder holding several.
+    let (mut candidates, _) = git.lookup(&repo, &commit, source.subdir.as_deref())?;
     if let Some(skill) = &source.skill {
         candidates.retain(|c| &c.name == skill || &c.dir_name == skill);
     }
     candidates.sort_by(|a, b| a.subdir.cmp(&b.subdir));
     println!("Source: {}", display(&url));
     println!("Commit: {commit}");
+    let dirs: Vec<&str> = candidates.iter().map(|c| c.subdir.as_str()).collect();
+    let files = git.files(&repo, &commit)?;
+    for plugin in crate::plugin::containing(&git, &repo, &commit, &files, &dirs) {
+        let root = if plugin.root.is_empty() {
+            "."
+        } else {
+            &plugin.root
+        };
+        let extras = if plugin.has_more() {
+            format!(", also ships {} that skl doesn't install", plugin.extras())
+        } else {
+            String::new()
+        };
+        println!(
+            "Plugin: {} ({}){}",
+            display(&plugin.name),
+            display(root),
+            display(&extras)
+        );
+    }
     if candidates.is_empty() {
         println!("No skills found (no regular-file SKILL.md).");
     } else {

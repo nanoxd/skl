@@ -19,6 +19,7 @@ Commands: `sync`, `update`, `add`, `remove`, `list`, `profile`, `agents`. Skills
 - `src/lock.rs`: the versioned lockfile.
 - `src/agents.rs`: known agents and their skills directories.
 - `src/paths.rs`: every location, from `HOME`, `SKL_CONFIG_DIR`/`XDG_CONFIG_HOME` and `SKL_DATA_DIR`/`XDG_DATA_HOME`.
+- `src/plugin.rs`: detects the plugin around skills that `add` and `discover` see, so a collection takes the plugin's name and `discover` notes what else it ships.
 - `src/profile.rs`: resolves the active profiles from `--profile`, `SKL_PROFILE`, then the machine's saved setting.
 - `tests/cli.rs`: end-to-end tests that run the built binary.
 - `examples/skills.toml`: annotated starter manifest for users.

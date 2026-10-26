@@ -75,7 +75,10 @@ Without `subdir`, a skill is found by the `name` in its `SKILL.md` frontmatter, 
 by directory name, and a repo with a single skill can be installed under any name.
 Copies inside hidden directories, such as a tool-specific mirror, are ignored only
 when a visible skill has the same name. Unique hidden skills, including `.curated`
-and `.experimental` collections, remain discoverable. If the name is ambiguous, `skl` asks you to set `subdir`.
+and `.experimental` collections, remain discoverable. If the name is ambiguous, `skl`
+lists each copy and asks you to set `subdir`. A skill from a
+[declared source with a `subdir`](#limiting-a-source-to-one-directory) is looked up
+only inside that directory.
 
 Skill names may contain letters, digits, `-`, `_` and `.`, and become the directory
 name in each agent.
@@ -104,8 +107,8 @@ repository, `command` names an app's export command, and `app` names an app skl
 knows, such as `app = "xcode"`. See [app sources](app-skills.md#app-sources)
 and [Xcode skills](xcode.md) for the last two. Every declared source also supports
 `skills`, `exclude`, `agents`, `profiles`, and `os`, and a Git source supports
-`ref`. The rest of this section describes Git sources, and app sources
-select and override their skills the same way.
+`ref` and [`subdir`](#limiting-a-source-to-one-directory). The rest of this section
+describes Git sources, and app sources select and override their skills the same way.
 
 Earlier manifests can keep their `[repositories.<alias>]` tables and
 `repository = "alias"` references, which mean the same as `[sources.<alias>]` and
@@ -184,8 +187,10 @@ the cached membership and report missing or stale coverage.
 
 Names must be unique across declared sources and explicit entries. To
 customize a generated skill, declare the same name with `source` set to that
-source's alias. Ambiguous duplicate names inside a wildcard source are errors;
-use an explicit selection and `subdir` instead. Discovery failures and collisions
+source's alias. Ambiguous duplicate names inside a wildcard source are errors
+that list each copy; set the source's `subdir` to the collection you want, or use
+an explicit selection with a per-skill `subdir`. See [name clashes](#name-clashes)
+for names that two declarations share. Discovery failures and collisions
 abort before changing the installation. Failed individual fetches or unpacks
 retain their previous pin and links. `--dry-run` discovers in a temporary cache
 without publishing lock/state/store/link changes.
@@ -193,6 +198,54 @@ without publishing lock/state/store/link changes.
 Saved update plans support explicit selections, alias references, and wildcard
 sources. Plans snapshot membership and exact pins; applying a plan never
 rediscovers membership after review. See [saved update plans](updates.md#saved-update-plans).
+
+### Limiting a source to one directory
+
+Some repositories ship the same skills more than once, such as a plugin repository
+with one copy for Cursor and an adapted copy for Claude Code in a sibling folder.
+Every name is then ambiguous across the whole repository. Set `subdir` on the
+declared source to the folder that holds the copy you want:
+
+```toml
+[sources.pstack]
+source = "cursor/plugins"
+subdir = "harness/pstack/claude-code/skills"
+skills = "*"
+exclude = ["teach"]
+```
+
+`subdir` on a declared source limits everything that finds skills by name:
+wildcard discovery, names in a `skills` list, and alias references such as
+`review = "team"`. Skills in nested folders beneath it are found too. The
+directory must stay inside the repository, and `"."` means the whole repository.
+A member can still set its own `subdir`, which is the exact directory of its
+`SKILL.md` relative to the repository root, even outside the source's `subdir`.
+App sources don't take `subdir`.
+
+The lock records the `subdir` alongside the wildcard's membership. Changing it
+needs an ordinary `sync`, which rediscovers the membership and looks up any locked
+skill again whose directory falls outside the new `subdir`.
+
+`skl add` writes this declaration for you from a tree URL, or a `--subdir`, that
+names a folder without a `SKILL.md` of its own. See
+[collections](adding-skills.md#collections-in-a-repository).
+
+### Name clashes
+
+Two declarations can provide the same skill name, such as a wildcard source and a
+`[skills]` entry, or two wildcard sources. Sync then stops before changing
+anything and names both declarations, with the line that keeps each copy:
+
+```text
+error: skills `tdd`, `teach` from source `pstack` (cursor/plugins) conflict with another declaration, source `matt` (mattpocock/skills). Keep one copy:
+  keep source `matt`'s: add exclude = ["tdd", "teach"] to source `pstack`
+  keep source `pstack`'s: add exclude = ["tdd", "teach"] to source `matt`
+```
+
+Every name the same two declarations share is reported together. skl doesn't
+rename skills at install time. Skills in one collection often refer to each other
+by folder name, such as `../teach/SKILL.md`, and a rename would break those
+references, so choose one copy with `exclude` instead.
 
 ## Lockfile
 
@@ -233,8 +286,8 @@ the manifest. Only explicit `sync` and `update` execute manifest commands.
 Automatic sync after other editing commands defers imports until that explicit run.
 
 Each `[sources.<alias>]` table records what a declared source last produced. A Git
-wildcard source records its `source`, `ref`, and complete `members`, mapping each
-name to its directory. An app source records its command and app version once,
+wildcard source records its `source`, `ref`, `subdir` if it has one, and complete
+`members`, mapping each name to its directory. An app source records its command and app version once,
 with one content digest per skill under `snapshots`. A skill exported by a
 different app version than the rest, such as after `skl update NAME` on one
 member, becomes a small table with its own `version`. A `"*"` app source also

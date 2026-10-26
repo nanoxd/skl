@@ -8,7 +8,7 @@ title: Finding and adding skills
 
 Search the catalog or inspect a source before choosing what to install.
 
-[Searching the catalog](#searching-the-catalog) · [Browsing repositories](#browsing-repositories) · [Source shortcuts](#source-shortcuts) · [Local collections](#local-collections) · [Interactive installation](#interactive-installation)
+[Searching the catalog](#searching-the-catalog) · [Browsing repositories](#browsing-repositories) · [Source shortcuts](#source-shortcuts) · [Collections in a repository](#collections-in-a-repository) · [Local collections](#local-collections) · [Interactive installation](#interactive-installation)
 
 ## Searching the catalog
 
@@ -50,6 +50,17 @@ skl discover anthropics/skills
 skl discover owner/repo --ref v1.0
 ```
 
+A tree URL limits the listing to one directory. When that directory holds a
+`SKILL.md`, discovery shows that skill. Otherwise it treats the directory as a
+[collection](#collections-in-a-repository) and lists every skill beneath it:
+
+```sh
+skl discover https://github.com/cursor/plugins/tree/main/harness/pstack/claude-code/skills
+```
+
+When the skills belong to a Claude Code or Cursor plugin, a `Plugin:` line names
+it and anything else it ships, such as agents, which skl doesn't install.
+
 Discovery needs no manifest and uses a temporary repository cache that is removed
 when the command finishes. It does not change configuration, installed skills,
 links, or the run lock. A root skill has subdirectory `.`. Duplicate names remain
@@ -71,7 +82,8 @@ skl add owner/repo --ref main --subdir skills/review
 ```
 
 Tree paths and `add --subdir` select the exact directory containing `SKILL.md`,
-including hidden directories; use `--subdir .` for the repository root. The
+including hidden directories; use `--subdir .` for the repository root. A directory
+without its own `SKILL.md` is a [collection](#collections-in-a-repository). The
 manifest stores the repository, ref, and directory separately, so subsequent
 syncs and updates use the same selection. `@skill` selects by skill or directory
 name and cannot be combined with a different `--skill` or with `--all`.
@@ -79,7 +91,9 @@ name and cannot be combined with a different `--skill` or with `--all`.
 When a [declared source](configuration.md#declared-sources) already names the
 repository, `add` adds the skill to that source instead. The ref and directory are
 only recorded when the source's own ref and name lookup would not find the same
-skill.
+skill. A source with its own [`subdir`](configuration.md#limiting-a-source-to-one-directory)
+only takes skills from inside it, and `add owner/repo -s NAME` looks the name up
+there.
 
 A tree URL normally uses the first segment after `tree/` as its ref. If an
 advertised branch or tag containing slashes also matches the URL, skl asks for
@@ -90,6 +104,46 @@ path. To override either, use the repository URL with `--ref` and `--subdir`.
 Tree URLs with percent escapes, fragments, or query strings are rejected with
 instructions to use those flags. Ordinary git URLs, SSH credentials and private
 repository authentication continue to pass through to git unchanged.
+
+## Collections in a repository
+
+Some repositories keep a set of skills in one folder, and some keep several copies
+of the same set for different agents. A tree URL or `--subdir` that names a folder
+without a `SKILL.md` of its own selects the skills beneath it:
+
+```sh
+# Every skill in the folder, tracked as one source
+skl add https://github.com/cursor/plugins/tree/main/harness/pstack/claude-code/skills --all
+
+# Only some of them, each recorded with its own directory
+skl add cursor/plugins --subdir harness/pstack/claude-code/skills -s poteto-mode -s verify
+```
+
+With `--all`, `add` declares one source with `skills = "*"` and the folder as its
+[`subdir`](configuration.md#limiting-a-source-to-one-directory), so later syncs
+pick up skills added to the folder and drop removed ones:
+
+```toml
+[sources.pstack]
+source = "https://github.com/cursor/plugins"
+ref = "main"
+subdir = "harness/pstack/claude-code/skills"
+skills = "*"
+exclude = ["teach"]
+```
+
+The source is named after the plugin that contains the folder, if any, otherwise
+after the folder, skipping a generic `skills`. Use `--alias NAME` to choose the
+name, which is required when a source by that name already exists. Names already
+in the manifest stay where they are and go into the new source's `exclude`, as
+`teach` did above. If a source already declares the repository and its `subdir`
+contains the folder, the skills join that source instead.
+
+When a name appears in more than one folder of a repository, `add` lists every
+copy and suggests the `--subdir` for each one, rather than guessing. skl doesn't
+rename skills to work around a clash. Skills in a collection often refer to each
+other by folder name, so see [name clashes](configuration.md#name-clashes) for
+choosing a copy with `exclude`.
 
 ## Local collections
 

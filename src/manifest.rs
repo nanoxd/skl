@@ -39,6 +39,8 @@ pub struct Skill {
     /// Profiles this skill installs under. Empty means every machine.
     pub profiles: Vec<String>,
     pub os: Vec<String>,
+    /// The declared source this skill comes from, if any.
+    pub group: Option<String>,
 }
 
 impl Skill {
@@ -71,6 +73,8 @@ pub struct GitOrigin {
     pub git_ref: Option<String>,
     /// Directory inside the repo holding SKILL.md. Discovered by name when unset.
     pub subdir: Option<String>,
+    /// The declared source's `subdir`: name lookups only search beneath it.
+    pub scope: Option<String>,
 }
 
 pub fn load(paths: &Paths) -> Result<Manifest> {
@@ -128,7 +132,8 @@ pub fn parse(text: &str, paths: &Paths) -> Result<Manifest> {
         };
         declarations.insert(crate::export::XCODE.into(), Value::Table(config));
     }
-    let (repositories, apps) = crate::repositories::parse(&mut table, &default_agents, paths)?;
+    let (repositories, apps, members) =
+        crate::repositories::parse(&mut table, &default_agents, paths)?;
     let skills = match table.remove("skills") {
         Some(Value::Table(skills)) => skills,
         Some(_) => bail!("`skills` must be a table"),
@@ -141,8 +146,14 @@ pub fn parse(text: &str, paths: &Paths) -> Result<Manifest> {
     let mut parsed = Vec::with_capacity(skills.len());
     for (name, value) in skills {
         validate_name(&name)?;
-        let skill = parse_skill(&name, value, &default_agents, paths)
+        let mut skill = parse_skill(&name, value, &default_agents, paths)
             .with_context(|| format!("skill `{name}`"))?;
+        if let Some((alias, scope)) = members.get(&name) {
+            skill.group = Some(alias.clone());
+            if let Origin::Git(origin) = &mut skill.origin {
+                origin.scope = scope.clone();
+            }
+        }
         parsed.push(skill);
     }
     Ok(Manifest {
@@ -168,6 +179,7 @@ pub(crate) fn parse_skill(
                 agents: default_agents.to_vec(),
                 profiles: Vec::new(),
                 os: Vec::new(),
+                group: None,
             });
         }
         Value::Table(table) => table,
@@ -273,30 +285,37 @@ pub(crate) fn parse_skill(
         agents,
         profiles,
         os,
+        group: None,
     })
 }
 
 fn git_origin(source: String, git_ref: Option<String>, subdir: Option<String>) -> Result<Origin> {
     let url = source_url(&source)?;
-    let subdir = subdir.and_then(|s| {
-        if s == "." {
-            Some(String::new())
-        } else {
-            let s = s.trim_matches('/');
-            (!s.is_empty()).then(|| s.to_string())
-        }
-    });
-    if let Some(dir) = &subdir
-        && dir.split('/').any(|part| part == ".." || part == ".")
-    {
-        bail!("`subdir` must stay inside the repository");
-    }
+    let subdir = match subdir {
+        Some(dir) if dir == "." => Some(String::new()),
+        Some(dir) => directory(&dir)?,
+        None => None,
+    };
     Ok(Origin::Git(GitOrigin {
         source,
         url,
         git_ref,
         subdir,
+        scope: None,
     }))
+}
+
+/// A repository directory as written in the manifest, without surrounding slashes.
+/// `.` and an empty path mean the root, which is None.
+pub fn directory(dir: &str) -> Result<Option<String>> {
+    let dir = dir.trim_matches('/');
+    if dir.is_empty() || dir == "." {
+        return Ok(None);
+    }
+    if dir.split('/').any(|part| matches!(part, "" | "." | "..")) {
+        bail!("`subdir` must stay inside the repository");
+    }
+    Ok(Some(dir.to_owned()))
 }
 
 /// `owner/repo` means GitHub. URLs, scp-style addresses and absolute paths pass through.
