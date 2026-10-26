@@ -24,6 +24,9 @@ use crate::{
 struct Observation {
     name: String,
     source_kind: &'static str,
+    /// For a plugin, the agents that install this copy.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    agents: Vec<String>,
     status: &'static str,
     path: Option<PathBuf>,
     message: String,
@@ -55,8 +58,9 @@ pub fn run(paths: &Paths, active: &Active, names: &[String], json_output: bool) 
     for name in names {
         manifest::validate_name(name)?;
         ensure!(
-            manifest.skills.iter().any(|s| s.name == *name),
-            "unknown skill `{name}`"
+            manifest.skills.iter().any(|s| s.name == *name)
+                || manifest.plugins.iter().any(|p| p.name == *name),
+            "unknown skill or plugin `{name}`"
         );
     }
     let mut diagnostics = Vec::new();
@@ -88,6 +92,7 @@ pub fn run(paths: &Paths, active: &Active, names: &[String], json_output: bool) 
         let mut observation = Observation {
             name: skill.name.clone(),
             source_kind: kind,
+            agents: Vec::new(),
             status: "skipped",
             path: None,
             message: "disabled for the active profiles or operating system".into(),
@@ -193,6 +198,30 @@ pub fn run(paths: &Paths, active: &Active, names: &[String], json_output: bool) 
         }
         observations.push(observation);
     }
+    manifest.plugins.sort_by(|a, b| a.name.cmp(&b.name));
+    for plugin in &manifest.plugins {
+        if !names.is_empty() && !names.contains(&plugin.name) {
+            continue;
+        }
+        for mut observation in verify_plugin(paths, active, &git, &lock, plugin)? {
+            if matches!(observation.status, "drift" | "unavailable") {
+                diagnostics.push(Diagnostic {
+                    code: if observation.status == "drift" {
+                        "content-drift"
+                    } else {
+                        "baseline-unavailable"
+                    },
+                    severity: "error",
+                    skill: Some(plugin.name.clone()),
+                    path: observation.path.clone(),
+                    message: observation.message.clone(),
+                    remedy: "Inspect the reported content; restore the cache from a trusted copy or move the affected plugin directory aside and run skl sync. Verification never repairs files.",
+                });
+            }
+            observation.name = plugin.name.clone();
+            observations.push(observation);
+        }
+    }
     let healthy = diagnostics.is_empty();
     if json_output {
         let observations = serde_json::to_value(observations)?;
@@ -212,8 +241,13 @@ pub fn run(paths: &Paths, active: &Active, names: &[String], json_output: bool) 
                 .as_ref()
                 .map(|p| format!(" ({})", paths.tilde(p)))
                 .unwrap_or_default();
+            let agents = if observation.agents.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", observation.agents.join(", "))
+            };
             println!(
-                "{}: {}{}: {}",
+                "{}: {}{agents}{}: {}",
                 observation.status, observation.name, location, observation.message
             );
             for change in observation.changes {
@@ -225,6 +259,84 @@ pub fn run(paths: &Paths, active: &Active, names: &[String], json_output: bool) 
         }
     }
     Ok(healthy)
+}
+
+/// Compares a plugin's store folders with the locked commit. Claude Code reads the
+/// store folder in place; Codex keeps its own copy, which skl can't see.
+fn verify_plugin(
+    paths: &Paths,
+    active: &Active,
+    git: &Git,
+    lock: &Lock,
+    plugin: &crate::plugins::Plugin,
+) -> Result<Vec<Observation>> {
+    let observation = |agents: Vec<String>, status, path, message: String| Observation {
+        name: plugin.name.clone(),
+        source_kind: "plugin",
+        agents,
+        status,
+        path,
+        message,
+        changes: Vec::new(),
+    };
+    if !plugin.enabled(active) {
+        return Ok(vec![observation(
+            Vec::new(),
+            "skipped",
+            None,
+            "disabled for the active profiles or operating system".into(),
+        )]);
+    }
+    let Some(entry) = lock.plugins.get(&plugin.name).filter(|e| e.matches(plugin)) else {
+        return Ok(vec![observation(
+            Vec::new(),
+            "unavailable",
+            None,
+            "no matching locked Git baseline".into(),
+        )]);
+    };
+    // Folders shared by several agents are checked once.
+    let mut folders: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for harness in &plugin.agents {
+        if let Some(dir) = entry.subdirs.get(harness.id()) {
+            folders.entry(dir).or_default().push(harness.id().into());
+        }
+    }
+    let mut out = Vec::new();
+    for (dir, agents) in folders {
+        let path = crate::plugins::store_dir(paths, &plugin.url, &entry.commit, dir);
+        let mut item = observation(
+            agents,
+            "verified",
+            Some(std::path::absolute(&path)?),
+            String::new(),
+        );
+        let temporary = tempfile::tempdir()?;
+        let baseline = temporary.path().join("baseline");
+        let result = git
+            .export_cached(&plugin.url, &entry.commit, dir, &baseline)
+            .context("locked Git baseline is unavailable in the existing repository cache")
+            .and_then(|()| {
+                ensure_directory_chain(&paths.store(), &path)?;
+                compare(&tree(&baseline)?, &tree(&path)?)
+            });
+        match result {
+            Ok(changes) if changes.is_empty() => {
+                item.message = "cached content matches the pinned baseline".into();
+            }
+            Ok(changes) => {
+                item.status = "drift";
+                item.message = "cached content differs from the pinned baseline".into();
+                item.changes = changes;
+            }
+            Err(error) => {
+                item.status = "unavailable";
+                item.message = format!("{error:#}");
+            }
+        }
+        out.push(item);
+    }
+    Ok(out)
 }
 
 /// Reject redirects at the skill root or any store ancestor. Recursion below never

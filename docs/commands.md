@@ -38,6 +38,7 @@ skl configure review notes --default-agents --all-os --all-profiles --no-sync
 skl remove notes             # remove from the manifest and unlink
 
 skl info review              # provenance, selection rules, content and link ownership
+skl info pstack              # a plugin: pinned commit, folders, and installs
 skl doctor                   # diagnose installation problems without changing files
 skl verify                   # check pinned cached content offline using existing Git cache
 skl verify review --json     # verify selected content with versioned JSON output
@@ -84,7 +85,9 @@ and creates no files. Exit 0 means the skill was found and inspected, even if it
 excluded, missing content, unlocked, or has conflicts. Unknown names, invalid
 arguments, and unreadable or malformed metadata exit non-zero. Names from
 wildcard sources become known after a successful sync; explicitly selected names can be
-inspected before export. Unmanaged entries can be inspected even without a manifest.
+inspected before export. Unmanaged entries can be inspected even without a manifest. A plugin name shows
+the plugin instead: its pinned commit, each agent's folder and store copy, and what
+skl recorded installing.
 
 `skl list` ends with a "Not managed by skl" section: every entry in each agent's
 skills directory that `skl` doesn't own, such as skills an app installed or leftovers

@@ -57,7 +57,28 @@ fn report_value(mut report: info::Report) -> Result<Value> {
     Ok(serde_json::to_value(report)?)
 }
 
+pub(crate) fn plugin_value(mut report: crate::plugins::Report) -> Result<Value> {
+    report.manifest = absolute(&report.manifest)?;
+    for agent in &mut report.agents {
+        for path in [
+            &mut agent.content_path,
+            &mut agent.recorded_target,
+            &mut agent.install_path,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            *path = absolute(path)?;
+        }
+    }
+    Ok(serde_json::to_value(report)?)
+}
+
 pub fn info(paths: &Paths, active: &Active, name: &str) -> Result<bool> {
+    if let Some(report) = info::plugin(paths, active, name)? {
+        emit("info", "ok", plugin_value(report)?, json!([]))?;
+        return Ok(true);
+    }
     let report = info::collect(paths, active, name)?;
     // Info reports observations; an unhealthy installation is still a successful inspection.
     emit("info", "ok", report_value(report)?, json!([]))?;
@@ -175,12 +196,36 @@ pub fn list(paths: &Paths, active: &Active) -> Result<bool> {
         }
     }
     unmanaged.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+    let state = crate::plugins::State::load(paths)?;
+    let mut plugins = vec![];
+    let mut sorted: Vec<_> = manifest.plugins.iter().collect();
+    sorted.sort_by(|a, b| a.name.cmp(&b.name));
+    for plugin in sorted {
+        let report = crate::plugins::report(paths, active, plugin, &lock, &state)?;
+        // Keep the same health criteria as the human list command.
+        for agent in &report.agents {
+            if !matches!(
+                agent.status,
+                crate::plugins::InstallStatus::NotInstalled
+                    | crate::plugins::InstallStatus::Outdated
+            ) {
+                continue;
+            }
+            diagnostics.push(json!({
+                "code": "plugin-not-installed", "severity": "error", "skill": plugin.name,
+                "path": agent.install_path.as_deref().map(path_value).transpose()?,
+                "message": format!("plugin is not installed for {}", agent.agent),
+                "remedy": "Run skl sync to install plugins.",
+            }));
+        }
+        plugins.push(plugin_value(report)?);
+    }
     let healthy = diagnostics.is_empty();
     emit(
         "list",
         if healthy { "ok" } else { "unhealthy" },
         json!({
-            "skills": skills, "unmanaged": unmanaged,
+            "skills": skills, "plugins": plugins, "unmanaged": unmanaged,
             "active_profiles": active.names, "profile_source": active.from.to_string(),
         }),
         json!(diagnostics),

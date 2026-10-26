@@ -1117,3 +1117,274 @@ pub fn live(
     }
     Ok(live)
 }
+
+/// What read-only commands show about one plugin, from the manifest, lock and
+/// plugin state. Never runs an agent's CLI.
+#[derive(Serialize)]
+pub struct Report {
+    pub name: String,
+    /// Always `plugin`, beside a skill report's origin.
+    pub origin: &'static str,
+    pub manifest: PathBuf,
+    pub source: String,
+    pub git_ref: Option<String>,
+    /// The plugin's name in the repository's marketplace.
+    pub plugin: String,
+    pub locked: Option<LockedPlugin>,
+    pub lock_matches: bool,
+    pub profiles: Vec<String>,
+    pub active_profiles: Vec<String>,
+    pub profile_source: String,
+    pub os: Vec<String>,
+    pub enabled: bool,
+    pub exclusions: Vec<String>,
+    pub agents: Vec<AgentReport>,
+}
+
+#[derive(Serialize)]
+pub struct AgentReport {
+    pub agent: String,
+    /// Whether this machine has the agent.
+    pub available: bool,
+    /// The folder the manifest sets, or none when the marketplace finds it.
+    pub subdir: Option<String>,
+    pub locked_subdir: Option<String>,
+    /// The plugin's store folder at the locked commit.
+    pub content_path: Option<PathBuf>,
+    pub content_available: bool,
+    /// What skl recorded installing: the agent's id for it and its store folder.
+    pub id: Option<String>,
+    pub recorded_target: Option<PathBuf>,
+    /// Where the agent loads it from: skl's marketplace link.
+    pub install_path: Option<PathBuf>,
+    pub status: InstallStatus,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstallStatus {
+    Installed,
+    NotInstalled,
+    /// Installed at an older commit or folder.
+    Outdated,
+    /// The agent isn't installed on this machine.
+    Unavailable,
+    /// Excluded by profiles or OS.
+    Disabled,
+    /// Recorded for an agent the plugin no longer lists.
+    Stale,
+}
+
+impl InstallStatus {
+    /// Whether the plugin needs a sync for this agent.
+    pub fn needs_sync(self) -> bool {
+        matches!(self, Self::NotInstalled | Self::Outdated | Self::Stale)
+    }
+}
+
+impl std::fmt::Display for InstallStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Installed => "installed (owned)",
+            Self::NotInstalled => "not installed",
+            Self::Outdated => "installed from an older commit or folder (owned)",
+            Self::Unavailable => "agent isn't installed",
+            Self::Disabled => "excluded",
+            Self::Stale => "installed but no longer selected (owned)",
+        })
+    }
+}
+
+/// Whether a store folder holds a plugin this harness reads.
+fn readable(harness: Harness, dir: &Path) -> bool {
+    harness.manifests().iter().any(|m| dir.join(m).is_file())
+        || harness == Harness::ClaudeCode
+            && ["skills", "agents", "commands"]
+                .iter()
+                .any(|folder| dir.join(folder).is_dir())
+}
+
+/// Where an agent loads a recorded install from.
+pub fn install_path(paths: &Paths, harness: Harness, record: &Installed) -> PathBuf {
+    marketplace_dir(paths, harness).join(record.id.split('@').next().unwrap_or_default())
+}
+
+pub fn report(
+    paths: &Paths,
+    active: &crate::profile::Active,
+    plugin: &Plugin,
+    lock: &crate::lock::Lock,
+    state: &State,
+) -> Result<Report> {
+    let enabled = plugin.enabled(active);
+    let mut exclusions = Vec::new();
+    if !manifest::matches_os(&plugin.os) {
+        exclusions.push(format!(
+            "OS {} is outside [{}]",
+            std::env::consts::OS,
+            plugin.os.join(", ")
+        ));
+    }
+    if !active.includes(&plugin.profiles) {
+        exclusions.push(format!(
+            "active profiles do not match [{}]",
+            plugin.profiles.join(", ")
+        ));
+    }
+    let locked = lock.plugins.get(&plugin.name).cloned();
+    let lock_matches = locked.as_ref().is_some_and(|e| e.matches(plugin));
+    let mut agents = Vec::new();
+    for harness in Harness::ALL {
+        let selected = plugin.agents.contains(&harness);
+        let record = state.get(harness.id(), &plugin.name);
+        if !selected && record.is_none() {
+            continue;
+        }
+        let locked_subdir = locked
+            .as_ref()
+            .filter(|_| lock_matches)
+            .and_then(|e| e.subdirs.get(harness.id()).cloned());
+        let content_path = locked_subdir
+            .as_ref()
+            .map(|dir| store_dir(paths, &plugin.url, &locked.as_ref().unwrap().commit, dir));
+        let content_available = content_path
+            .as_deref()
+            .is_some_and(|dir| readable(harness, dir));
+        let available = harness.available()?;
+        let install_path = record.map(|r| install_path(paths, harness, r));
+        let status = if !selected || !enabled {
+            if record.is_some() {
+                InstallStatus::Stale
+            } else {
+                InstallStatus::Disabled
+            }
+        } else if !available {
+            InstallStatus::Unavailable
+        } else {
+            match record {
+                None => InstallStatus::NotInstalled,
+                Some(r) if Some(&r.target) != content_path.as_ref() => InstallStatus::Outdated,
+                Some(_) => InstallStatus::Installed,
+            }
+        };
+        agents.push(AgentReport {
+            agent: harness.id().into(),
+            available,
+            subdir: plugin.subdir.get(harness).map(str::to_owned),
+            locked_subdir,
+            content_path,
+            content_available,
+            id: record.map(|r| r.id.clone()),
+            recorded_target: record.map(|r| r.target.clone()),
+            install_path,
+            status,
+        });
+    }
+    Ok(Report {
+        name: plugin.name.clone(),
+        origin: "plugin",
+        manifest: paths.manifest(),
+        source: plugin.source.clone(),
+        git_ref: plugin.git_ref.clone(),
+        plugin: plugin.plugin.clone(),
+        locked,
+        lock_matches,
+        profiles: plugin.profiles.clone(),
+        active_profiles: active.names.clone(),
+        profile_source: active.from.to_string(),
+        os: plugin.os.clone(),
+        enabled,
+        exclusions,
+        agents,
+    })
+}
+
+impl Report {
+    pub fn print(&self, paths: &Paths) {
+        println!(
+            "Plugin: {}\nManifest: {}\nSource: {}\nRef: {}",
+            self.name,
+            paths.tilde(&self.manifest),
+            self.source,
+            self.git_ref.as_deref().unwrap_or("default branch"),
+        );
+        if self.plugin != self.name {
+            println!("Marketplace name: {}", self.plugin);
+        }
+        match &self.locked {
+            Some(entry) => println!(
+                "Pinned commit: {}\nLock: {}",
+                entry.commit,
+                if self.lock_matches {
+                    "matches manifest"
+                } else {
+                    "stale (does not match manifest)"
+                }
+            ),
+            None => println!("Lock: not locked"),
+        }
+        println!(
+            "Profiles: {}\nActive profiles: {} ({})\nOS: {} (current: {})\nSelection: {}",
+            if self.profiles.is_empty() {
+                "all".into()
+            } else {
+                self.profiles.join(", ")
+            },
+            if self.active_profiles.is_empty() {
+                "none".into()
+            } else {
+                self.active_profiles.join(", ")
+            },
+            self.profile_source,
+            if self.os.is_empty() {
+                "all".into()
+            } else {
+                self.os.join(", ")
+            },
+            std::env::consts::OS,
+            if self.enabled {
+                "included".into()
+            } else {
+                format!("excluded: {}", self.exclusions.join("; "))
+            }
+        );
+        for agent in &self.agents {
+            let status = match agent.status {
+                InstallStatus::Unavailable => Harness::named(&agent.agent)
+                    .map_or_else(|| agent.status.to_string(), Harness::absence),
+                status => status.to_string(),
+            };
+            match &agent.id {
+                Some(id) => println!("Agent {}: {status} as {id}", agent.agent),
+                None => println!("Agent {}: {status}", agent.agent),
+            }
+            let folder = match (&agent.locked_subdir, &agent.subdir) {
+                (Some(dir), _) | (None, Some(dir)) if dir.is_empty() => ".".to_owned(),
+                (Some(dir), _) | (None, Some(dir)) => dir.clone(),
+                (None, None) => "from the marketplace".into(),
+            };
+            println!("  Folder: {folder}");
+            if let Some(path) = &agent.content_path {
+                println!(
+                    "  Content: {} ({})",
+                    paths.tilde(path),
+                    if agent.content_available {
+                        "available"
+                    } else {
+                        "missing"
+                    }
+                );
+            }
+            if let Some(path) = &agent.install_path {
+                println!("  Installed from: {}", paths.tilde(path));
+            }
+            if let Some(target) = agent
+                .recorded_target
+                .as_ref()
+                .filter(|t| Some(*t) != agent.content_path.as_ref())
+            {
+                println!("  Recorded target: {}", paths.tilde(target));
+            }
+        }
+    }
+}

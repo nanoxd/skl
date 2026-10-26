@@ -6,7 +6,7 @@ title: Diagnostics and scripting
 
 # Diagnostics and scripting
 
-Use `skl info NAME` to inspect one skill and `skl doctor` to check your installation.
+Use `skl info NAME` to inspect one skill or plugin and `skl doctor` to check your installation.
 
 [Diagnostics](#diagnostics) · [Content verification](#content-verification) · [JSON inspection](#json-inspection)
 
@@ -17,7 +17,9 @@ Use `skl info NAME` to inspect one skill and `skl doctor` to check your installa
 required tools on PATH. It prints remedies and exits with status 1 when problems
 are found (0 when healthy). It never changes files, takes a run lock, invokes
 external tools, or contacts the network. It checks cached app exports, including
-Xcode, without exporting new skills. Matching user-created links remain healthy and unowned. Local `SKILL.md`
+Xcode, without exporting new skills. Matching user-created links remain healthy and unowned. For
+[plugins](plugins.md#inspecting-plugins) it reads `plugins/state.toml` instead of
+running an agent's CLI. Local `SKILL.md`
 symlinks are accepted; cached Git and app skill files must be regular files. Diagnostics describe a point-in-time view; rerun after
 a concurrent sync finishes.
 
@@ -38,6 +40,8 @@ symlinks without following them; redirected skill roots or store ancestors are
 rejected. Git and tar must be available. Verification never initializes a
 repository or fetches, including Git's implicit partial-clone lazy fetching.
 Missing cached commits or repositories produce `unavailable`, never `verified`.
+
+Each plugin's store folder is verified the same way, once per folder.
 
 Cached app skills, including Xcode's, are checked against their lockfile digest
 without running the app or any external tools. The digest includes contents, paths, types, and
@@ -75,7 +79,15 @@ Paths that cannot be represented as UTF-8 produce a structured runtime error.
   `snapshot`. Each link has `path`, optional `target` and
   `recorded_target`, `owned`, and `status`: `missing`, `unmanaged`, `broken`,
   `different_target`, `installed`, or `local_source`.
-- `list` data has `skills` (the same reports, sorted by name), `unmanaged`
+- `info` for a plugin has `origin: "plugin"`, `name`, `manifest`, `source`,
+  `git_ref`, `plugin`, `locked`, `lock_matches`, `profiles`, `active_profiles`,
+  `profile_source`, `os`, `enabled`, `exclusions`, and `agents`. Each agent has
+  `agent`, `available`, `content_available`, `status`, and nullable `subdir`,
+  `locked_subdir`, `content_path`, `id`, `recorded_target`, and `install_path`.
+  Status is `installed`, `not_installed`, `outdated`, `unavailable`,
+  `disabled`, or `stale`.
+- `list` data has `skills` (the same reports, sorted by name), `plugins` (plugin
+  reports, sorted by name), `unmanaged`
   (entries sorted by path, each with `agent`, `name`, `path`, `kind`, and nullable
   `target`), `active_profiles`, and `profile_source`. Unmanaged entries can also
   appear as conflicting links in a configured skill report. Hidden entries are
@@ -83,10 +95,12 @@ Paths that cannot be represented as UTF-8 produce a structured runtime error.
 - `doctor` data has `active_profiles` and `profile_source`. Its diagnostics use
   `stale-lock`, `missing-tool`, `source-not-locked`, `not-locked`, `invalid-cache`,
   `missing-local-skill`, `stale-state`, `missing-link`, `unreadable-link`,
-  `outdated-link`, `broken-link`, or `link-conflict`.
+  `outdated-link`, `broken-link`, or `link-conflict`, and for plugins
+  `plugin-not-installed`, `outdated-plugin`, or `stale-plugin`.
 
 - `verify` data has `active_profiles`, `profile_source`, and `skills`, sorted by
-  name. Each skill has `name`, `source_kind` (`git`, `command`, `app`, or `local`),
+  name, then plugins. Each has `name`, `source_kind` (`git`, `command`, `app`,
+  `local`, or `plugin`), `agents` for a plugin,
   `status` (`verified`, `drift`, `unavailable`, or `skipped`), nullable absolute
   cache `path`, `message`, and `changes`. Changes have a path relative to the
   skill directory and `kind` (`added`, `deleted`, `changed`, or `digest-changed`).
@@ -94,7 +108,8 @@ Paths that cannot be represented as UTF-8 produce a structured runtime error.
   `baseline-unavailable`; either causes `status: "unhealthy"` and exit status 1.
 
 Runtime failures use `runtime-error`. List health diagnostics use `not-linked`
-(or `source-not-locked` for undiscovered wildcard sources). Exit codes match human
+(or `source-not-locked` for undiscovered wildcard sources), and
+`plugin-not-installed` for plugins. Exit codes match human
 output: `info` succeeds when inspection completes, even if content or links are
 missing; `doctor` fails when it finds any diagnostic; `list` fails for missing
 active links or undiscovered active wildcard sources. List retains its
