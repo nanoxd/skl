@@ -33,6 +33,9 @@ Understand link ownership, backups, and where skl keeps its files.
 - **Dotfiles links.** If `skills.toml` or `skills.lock` is a symlink into a dotfiles
   checkout, `skl` writes to its target and keeps the link. Writes go through a
   temporary file, so an interrupted run never leaves half a file.
+- **Plugins.** skl records each plugin install in `plugins/state.toml` before making
+  it, and only updates or uninstalls the plugins it recorded. See
+  [plugins](plugins.md#ownership-and-safety).
 - **`SKILL.md` must be a regular file.** A symlinked `SKILL.md`, which could point
   anywhere, isn't treated as a skill and is never installed.
 
@@ -51,6 +54,8 @@ SSH keys and credential helpers you already have.
   store/commands/<digest>/<name>  app snapshots, including Xcode
   repos/                        git caches, so updates only fetch what changed
   state.toml                    the links skl created
+  plugins/<agent>/              the marketplace each agent installs skl's plugins from
+  plugins/state.toml            the plugin installs skl made
   profile                       this machine's profiles
   backup/                       what --force moved aside
   run.lock                      held while a command runs

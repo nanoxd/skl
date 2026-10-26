@@ -6064,6 +6064,7 @@ fn collection_tree_urls_discover_and_add_one_scoped_source() {
     let out = env.skl(&["add", &format!("{tree}/{CLAUDE_PSTACK}"), "--all"]);
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stdout.contains(&format!(
             "Added source `pstack` with every skill in {CLAUDE_PSTACK}"
@@ -6073,6 +6074,18 @@ fn collection_tree_urls_discover_and_add_one_scoped_source() {
     assert!(
         stdout.contains("= excluded teach from `pstack`"),
         "{stdout}"
+    );
+    assert!(
+        stderr.contains(
+            "plugin `pstack` (harness/pstack/claude-code) also ships agents poteto-agent, which installing its skills alone leaves out"
+        ),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(
+            "Install the whole plugin instead: skl add https://github.com/acme/plugins --plugin pstack"
+        ),
+        "{stderr}"
     );
     let text = fs::read_to_string(env.config("skills.toml")).unwrap();
     assert!(
@@ -6146,7 +6159,17 @@ fn add_from_duplicated_subtrees_names_the_collections_to_choose() {
     assert_eq!(fs::read_to_string(env.config("skills.toml")).unwrap(), "");
 
     // Named skills from a collection record their own directories.
-    env.ok(&["add", &url, "--subdir", "pstack/skills", "-s", "teach"]);
+    let out = env.skl(&["add", &url, "--subdir", "pstack/skills", "-s", "teach"]);
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("plugin `pstack` (pstack) also ships agents poteto-agent"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("skl add {url} --plugin pstack --subdir pstack")),
+        "{stderr}"
+    );
     assert_eq!(
         manifest_toml(&env)["skills"]["teach"]["subdir"].as_str(),
         Some("pstack/skills/teach")
@@ -6268,4 +6291,397 @@ fn name_clashes_name_both_sources_and_the_exclude_that_resolves_them() {
     );
     assert!(body(&env.claude("poteto-mode")).contains("claude-code"));
     assert!(!env.claude("tdd").exists());
+}
+
+/// Fake `claude` and `codex` binaries, compiled once.
+fn fake_harness() -> &'static Path {
+    static BIN: std::sync::OnceLock<TempDir> = std::sync::OnceLock::new();
+    BIN.get_or_init(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("harness");
+        let output = Command::new("rustc")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/harness.rs"
+            ))
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        dir
+    })
+    .path()
+}
+
+impl Env {
+    /// Runs skl with fake versions of the named harness CLIs and never a real one.
+    fn with_harnesses(&self, programs: &[&str], args: &[&str]) -> Output {
+        let bin = self.remotes.join(format!("bin-{}", programs.join("-")));
+        fs::create_dir_all(&bin).unwrap();
+        for program in programs {
+            let link = bin.join(program);
+            if !link.exists() {
+                std::os::unix::fs::symlink(fake_harness().join("harness"), link).unwrap();
+            }
+        }
+        // Keep git and tar, but drop any directory holding a real agent CLI.
+        let inherited = std::env::var_os("PATH").unwrap();
+        let system = std::env::split_paths(&inherited)
+            .filter(|dir| !dir.join("claude").exists() && !dir.join("codex").exists());
+        let path = std::env::join_paths(std::iter::once(bin).chain(system)).unwrap();
+        self.skl_with_env(args, &[("PATH", path.as_os_str())])
+    }
+
+    fn harness(&self, args: &[&str]) -> Output {
+        self.with_harnesses(&["claude", "codex"], args)
+    }
+
+    fn harness_ok(&self, args: &[&str]) -> String {
+        let out = self.harness(args);
+        assert!(out.status.success(), "skl {args:?} failed");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// What the fake harness has installed, and every call it received.
+    fn fake(&self, program: &str, file: &str) -> String {
+        fs::read_to_string(self.home.join(format!(".fake-{program}")).join(file))
+            .unwrap_or_default()
+    }
+
+    fn marketplace_link(&self, agent: &str, plugin: &str) -> PathBuf {
+        self.home
+            .join(".local/share/skl/plugins")
+            .join(agent)
+            .join(plugin)
+    }
+}
+
+#[test]
+fn plugins_install_through_each_harness_and_follow_the_lock() {
+    let env = Env::new();
+    let url = plugins_repo(&env);
+    env.write_manifest(&format!("[plugins.pstack]\nsource = '{url}'\n"));
+
+    // A dry run changes nothing and runs no harness CLI.
+    let out = env.harness_ok(&["sync", "--dry-run"]);
+    assert!(
+        out.contains("would install pstack@skl in claude-code"),
+        "{out}"
+    );
+    assert!(out.contains("would install pstack@skl in codex"), "{out}");
+    assert_eq!(env.fake("claude", "log"), "");
+    assert!(!env.config("skills.lock").exists());
+
+    let out = env.harness_ok(&["sync"]);
+    assert!(out.contains("installed pstack@skl in claude-code"), "{out}");
+    assert!(out.contains("installed pstack@skl in codex"), "{out}");
+    assert!(out.contains("(0 skills, 1 plugin)"), "{out}");
+    let lock = lock_toml(&env);
+    assert_eq!(lock["version"].as_integer(), Some(4));
+    let entry = &lock["plugins"]["pstack"];
+    assert_eq!(
+        entry["subdirs"]["claude-code"].as_str(),
+        Some("harness/pstack/claude-code")
+    );
+    assert_eq!(
+        entry["subdirs"]["codex"].as_str(),
+        Some("harness/pstack/claude-code")
+    );
+    assert_eq!(env.fake("claude", "installed"), "pstack@skl\n");
+    assert_eq!(env.fake("codex", "installed"), "pstack@skl\n");
+    // Claude Code reads the marketplace's linked folder in place; Codex copies it.
+    let link = env.marketplace_link("claude-code", "pstack");
+    assert!(link.join("agents/poteto-agent.md").is_file());
+    assert!(
+        env.home
+            .join(".fake-codex/cache/pstack/agents/poteto-agent.md")
+            .is_file()
+    );
+    assert!(
+        env.harness_ok(&["sync"])
+            .contains("Up to date: 0 skills, 1 plugin")
+    );
+    env.harness_ok(&["sync", "--locked"]);
+    let plan = env.home.join("plan.toml");
+    assert!(
+        env.fails(&["update", "--plan", plan.to_str().unwrap()])
+            .contains("update plans don't cover plugins yet")
+    );
+    assert!(!plan.exists());
+    let list = env.harness_ok(&["list"]);
+    assert!(list.contains("Plugins:"), "{list}");
+    assert!(!list.contains("not installed"), "{list}");
+
+    // A new commit waits for `update`, which repoints Claude Code's folder and adds
+    // the plugin to Codex again.
+    let remote = env.remote("plugins");
+    fs::write(
+        remote.join("harness/pstack/claude-code/agents/poteto-agent.md"),
+        "agent v2",
+    )
+    .unwrap();
+    commit(&remote, "agent v2");
+    env.harness_ok(&["sync"]);
+    assert_eq!(
+        fs::read_to_string(link.join("agents/poteto-agent.md")).unwrap(),
+        "agent"
+    );
+    let old_target = fs::read_link(&link).unwrap();
+    let out = env.harness_ok(&["update", "pstack"]);
+    assert!(out.contains("↑ pstack"), "{out}");
+    assert!(out.contains("poteto-agent.md"), "{out}");
+    assert_eq!(
+        fs::read_to_string(link.join("agents/poteto-agent.md")).unwrap(),
+        "agent v2"
+    );
+    assert_eq!(
+        fs::read_to_string(
+            env.home
+                .join(".fake-codex/cache/pstack/agents/poteto-agent.md")
+        )
+        .unwrap(),
+        "agent v2"
+    );
+    assert_eq!(
+        env.fake("claude", "log").matches("plugin install").count(),
+        1
+    );
+    assert_eq!(env.fake("codex", "log").matches("plugin add").count(), 2);
+    assert!(
+        !old_target.exists(),
+        "the old commit should be garbage collected"
+    );
+}
+
+#[test]
+fn plugin_folders_follow_each_harness_marketplace_and_per_agent_overrides() {
+    let env = Env::new();
+    let url = plugins_repo(&env);
+    // Codex reads its own marketplace first, which lists the Cursor copy.
+    let remote = env.remote("plugins");
+    fs::create_dir_all(remote.join(".agents/plugins")).unwrap();
+    fs::write(
+        remote.join(".agents/plugins/marketplace.json"),
+        r#"{"name": "fixture-plugins", "plugins": [{"name": "pstack", "source": "./pstack"}]}"#,
+    )
+    .unwrap();
+    commit(&remote, "codex marketplace");
+    env.write_manifest(&format!("[plugins.pstack]\nsource = '{url}'\n"));
+    env.harness_ok(&["sync"]);
+    let subdirs = lock_toml(&env)["plugins"]["pstack"]["subdirs"].clone();
+    assert_eq!(
+        subdirs["claude-code"].as_str(),
+        Some("harness/pstack/claude-code")
+    );
+    assert_eq!(subdirs["codex"].as_str(), Some("pstack"));
+    let commit_before = lock_toml(&env)["plugins"]["pstack"]["commit"].clone();
+
+    // An override moves one agent without moving the commit.
+    env.write_manifest(&format!(
+        "[plugins.pstack]\nsource = '{url}'\nsubdir = {{ codex = 'harness/pstack/claude-code' }}\n"
+    ));
+    let out = env.harness_ok(&["sync"]);
+    assert!(out.contains("updated pstack@skl in codex"), "{out}");
+    let lock = lock_toml(&env);
+    assert_eq!(
+        lock["plugins"]["pstack"]["subdirs"]["codex"].as_str(),
+        Some("harness/pstack/claude-code")
+    );
+    assert_eq!(lock["plugins"]["pstack"]["commit"], commit_before);
+
+    // Only agents that install plugins.
+    for (setting, message) in [
+        ("subdir = { opencode = 'x' }", "doesn't install plugins"),
+        ("agents = ['opencode']", "doesn't install plugins"),
+        ("subdir = '../outside'", "inside the repository"),
+        ("path = 'x'", "unknown key `path`"),
+    ] {
+        env.write_manifest(&format!("[plugins.pstack]\nsource = '{url}'\n{setting}\n"));
+        assert!(env.fails(&["sync"]).contains(message), "{setting}");
+    }
+    env.write_manifest(&format!(
+        "agents = ['~/custom']\n[plugins.pstack]\nsource = '{url}'\n"
+    ));
+    assert!(
+        env.fails(&["sync"])
+            .contains("none of the manifest's agents install plugins")
+    );
+    // A skill and a plugin can't share a name, so commands that take either agree.
+    env.write_manifest(&format!(
+        "[plugins.pstack]\nsource = '{url}'\n[skills]\npstack = '{url}'\n"
+    ));
+    assert!(
+        env.fails(&["list"])
+            .contains("`pstack` is both a skill and a plugin")
+    );
+}
+
+#[test]
+fn plugins_uninstall_only_what_skl_installed_and_report_conflicts() {
+    let env = Env::new();
+    let url = plugins_repo(&env);
+    // The same plugin installed from another marketplace would load twice.
+    let fake = env.home.join(".fake-codex");
+    fs::create_dir_all(&fake).unwrap();
+    fs::write(
+        fake.join("installed"),
+        "pstack@fixture-plugins\nother@elsewhere\n",
+    )
+    .unwrap();
+    env.write_manifest(&format!("[plugins.pstack]\nsource = '{url}'\n"));
+    let out = env.harness(&["sync"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("codex already has pstack@fixture-plugins installed outside skl"),
+        "{stderr}"
+    );
+    assert_eq!(env.fake("claude", "installed"), "pstack@skl\n");
+    assert_eq!(
+        env.fake("codex", "installed"),
+        "pstack@fixture-plugins\nother@elsewhere\n"
+    );
+
+    // Removing the entry uninstalls skl's own installs and nothing else.
+    fs::write(fake.join("installed"), "other@elsewhere\n").unwrap();
+    env.harness_ok(&["sync"]);
+    assert_eq!(
+        env.fake("codex", "installed"),
+        "other@elsewhere\npstack@skl\n"
+    );
+    let out = env.harness_ok(&["remove", "pstack"]);
+    assert!(
+        out.contains("uninstalled pstack@skl from claude-code"),
+        "{out}"
+    );
+    assert!(out.contains("uninstalled pstack@skl from codex"), "{out}");
+    assert_eq!(env.fake("claude", "installed"), "");
+    assert_eq!(env.fake("codex", "installed"), "other@elsewhere\n");
+    assert!(
+        !fs::read_to_string(env.config("skills.toml"))
+            .unwrap()
+            .contains("plugins")
+    );
+    assert_eq!(lock_toml(&env)["version"].as_integer(), Some(3));
+    assert!(lock_toml(&env).get("plugins").is_none());
+    assert_eq!(env.store_commits(), 0);
+    assert!(!env.marketplace_link("claude-code", "pstack").exists());
+}
+
+#[test]
+fn plugin_install_failures_and_missing_harnesses_keep_what_worked() {
+    let env = Env::new();
+    let url = plugins_repo(&env);
+    env.write_manifest(&format!("[plugins.pstack]\nsource = '{url}'\n"));
+    // Without codex on PATH, Claude Code still gets the plugin.
+    let out = env.with_harnesses(&["claude"], &["sync"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("codex: `codex` isn't installed, so its plugins are skipped"),
+        "{stdout}"
+    );
+    assert_eq!(env.fake("claude", "installed"), "pstack@skl\n");
+    let list =
+        String::from_utf8_lossy(&env.with_harnesses(&["claude"], &["list"]).stdout).into_owned();
+    assert!(list.contains("`codex` isn't installed"), "{list}");
+
+    // A failed install is a problem the next sync retries.
+    let fake = env.home.join(".fake-codex");
+    fs::create_dir_all(&fake).unwrap();
+    fs::write(fake.join("fail"), "").unwrap();
+    let out = env.harness(&["sync"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("codex install"));
+    let list = env.harness(&["list"]);
+    assert!(!list.status.success());
+    assert!(String::from_utf8_lossy(&list.stdout).contains("not installed for codex"));
+    fs::remove_file(fake.join("fail")).unwrap();
+    env.harness_ok(&["sync"]);
+    assert_eq!(env.fake("codex", "installed"), "pstack@skl\n");
+}
+
+#[test]
+fn add_plugin_checks_every_agent_before_writing_the_entry() {
+    let env = Env::new();
+    let url = plugins_repo(&env);
+    env.write_manifest("[skills]\n");
+    let err = env.fails(&["add", &url, "--plugin", "missing", "--no-sync"]);
+    assert!(err.contains("no marketplace in"), "{err}");
+    assert!(
+        err.contains("lists plugin `missing` for claude-code"),
+        "{err}"
+    );
+    assert!(
+        env.fails(&[
+            "add",
+            &url,
+            "--plugin",
+            "pstack",
+            "--agent",
+            "~/custom",
+            "--no-sync"
+        ])
+        .contains("doesn't install plugins")
+    );
+    assert_eq!(
+        fs::read_to_string(env.config("skills.toml")).unwrap(),
+        "[skills]\n"
+    );
+
+    let out = env.ok(&["add", &url, "--plugin", "pstack", "--no-sync"]);
+    assert!(
+        out.contains("Added plugin pstack: claude-code from harness/pstack/claude-code"),
+        "{out}"
+    );
+    let text = fs::read_to_string(env.config("skills.toml")).unwrap();
+    assert_eq!(
+        text,
+        format!("[plugins.pstack]\nsource = \"{url}\"\n\n[skills]\n")
+    );
+    assert!(
+        env.ok(&["add", &url, "--plugin", "pstack", "--no-sync"])
+            .contains("already in the manifest")
+    );
+    env.ok(&[
+        "add",
+        &url,
+        "--plugin",
+        "pstack",
+        "--alias",
+        "cursor-pstack",
+        "--subdir",
+        "pstack",
+        "--agent",
+        "codex",
+        "--no-sync",
+    ]);
+    let manifest = manifest_toml(&env);
+    let cursor = &manifest["plugins"]["cursor-pstack"];
+    assert_eq!(cursor["plugin"].as_str(), Some("pstack"));
+    assert_eq!(cursor["subdir"].as_str(), Some("pstack"));
+    assert_eq!(cursor["agents"], toml::Value::Array(vec!["codex".into()]));
+
+    // Installing a plugin's skills alone points at --plugin.
+    let out = env.skl(&[
+        "add",
+        &url,
+        "--subdir",
+        "pstack/skills",
+        "-s",
+        "teach",
+        "--no-sync",
+    ]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "Install the whole plugin instead: skl add {url} --plugin pstack --subdir pstack"
+        )),
+        "{stderr}"
+    );
 }

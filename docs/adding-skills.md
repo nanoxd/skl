@@ -8,7 +8,7 @@ title: Finding and adding skills
 
 Search the catalog or inspect a source before choosing what to install.
 
-[Searching the catalog](#searching-the-catalog) · [Browsing repositories](#browsing-repositories) · [Source shortcuts](#source-shortcuts) · [Collections in a repository](#collections-in-a-repository) · [Local collections](#local-collections) · [Interactive installation](#interactive-installation)
+[Searching the catalog](#searching-the-catalog) · [Browsing repositories](#browsing-repositories) · [Source shortcuts](#source-shortcuts) · [Collections in a repository](#collections-in-a-repository) · [Plugins](#plugins) · [Local collections](#local-collections) · [Interactive installation](#interactive-installation)
 
 ## Searching the catalog
 
@@ -58,8 +58,8 @@ A tree URL limits the listing to one directory. When that directory holds a
 skl discover https://github.com/cursor/plugins/tree/main/harness/pstack/claude-code/skills
 ```
 
-When the skills belong to a Claude Code or Cursor plugin, a `Plugin:` line names
-it and anything else it ships, such as agents, which skl doesn't install.
+When the skills belong to a Claude Code or Cursor [plugin](#plugins), a `Plugin:`
+line names it and anything else it ships, such as agents.
 
 Discovery needs no manifest and uses a temporary repository cache that is removed
 when the command finishes. It does not change configuration, installed skills,
@@ -144,6 +144,27 @@ copy and suggests the `--subdir` for each one, rather than guessing. skl doesn't
 rename skills to work around a clash. Skills in a collection often refer to each
 other by folder name, so see [name clashes](configuration.md#name-clashes) for
 choosing a copy with `exclude`.
+
+## Plugins
+
+Claude Code, Codex, and Cursor plugins keep their skills next to agents, commands
+and hooks, under a `.claude-plugin`, `.codex-plugin`, or `.cursor-plugin` manifest.
+Install the whole plugin with `--plugin`:
+
+```sh
+skl add cursor/plugins --plugin pstack
+```
+
+Installing only some of a plugin's skills works too, but leaves its agents,
+commands, and hooks behind, so `add` warns and prints the command that installs
+the whole plugin:
+
+```text
+warning: plugin `pstack` (harness/pstack/claude-code) also ships agents comment-sicko, poteto-agent, which installing its skills alone leaves out. Skills that hand work to them won't find them.
+  Install the whole plugin instead: skl add https://github.com/cursor/plugins --plugin pstack
+```
+
+See [plugins](plugins.md) for how skl installs them in Claude Code and Codex.
 
 ## Local collections
 

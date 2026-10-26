@@ -27,6 +27,7 @@ skl add owner/repo                 # a repo with a single skill
 skl add owner/repo -s a -s b       # pick skills from a repo with several
 skl add owner/repo --all           # every skill in the repo
 skl add owner/repo --subdir skills/set --all  # every skill in one folder, as a source
+skl add owner/repo --plugin name   # a whole plugin, in Claude Code and Codex
 skl add owner/repo --ref v2.0.0    # follow a branch or tag, or pin a full SHA
 skl add ~/dev/skills/my-skill      # a local skill
 skl add owner/repo --no-sync       # only edit the manifest
