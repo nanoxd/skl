@@ -16,6 +16,19 @@ use crate::{
     profile::Active,
 };
 
+/// Plans carrying plugins. Plans without them stay version 3.
+const PLAN: u32 = 4;
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// A folder at a commit, as git names its tree.
+fn tree(commit: &str, dir: &str) -> String {
+    if dir.is_empty() {
+        commit.to_owned()
+    } else {
+        format!("{commit}:{dir}")
+    }
+}
+
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Context {
@@ -153,7 +166,14 @@ impl Plan {
                 .with_context(|| format!("reading plan {}", paths.tilde(file)))?,
         )
         .with_context(|| format!("invalid update plan {}", paths.tilde(file)))?;
-        if plan.version != 3 {
+        // Version 4 plans carry plugins, which an older skl would drop.
+        if plan.version
+            != if plan.target.plugins.is_empty() {
+                3
+            } else {
+                PLAN
+            }
+        {
             bail!("unsupported update plan version {}", plan.version);
         }
         if plan.context != Context::read(paths, active)? {
@@ -263,9 +283,50 @@ impl Plan {
             bail!("unexpected app snapshot in plan");
         }
 
-        // Moving app snapshots into `[commands]` upgrades older locks.
-        if ![old.version, crate::lock::VERSION].contains(&plan.target.version) {
+        // Moving app snapshots into `[commands]` upgrades older locks, and plugins
+        // need version 4.
+        let version = if plan.target.plugins.is_empty() {
+            [old.version, crate::lock::VERSION].contains(&plan.target.version)
+                && plan.target.version != crate::lock::PLUGINS
+        } else {
+            plan.target.version == crate::lock::PLUGINS
+        };
+        if !version {
             bail!("invalid update plan lock metadata");
+        }
+        let mut plugins = BTreeMap::new();
+        for plugin in &manifest.plugins {
+            let previous = old.plugins.get(&plugin.name);
+            if !plugin.enabled(active) {
+                if let Some(entry) = previous {
+                    plugins.insert(plugin.name.clone(), entry.clone());
+                }
+                continue;
+            }
+            let entry = plan
+                .target
+                .plugins
+                .get(&plugin.name)
+                .with_context(|| format!("update plan is missing plugin `{}`", plugin.name))?;
+            if !entry.matches(plugin)
+                || ![40, 64].contains(&entry.commit.len())
+                || !entry.commit.bytes().all(|b| b.is_ascii_hexdigit())
+                || entry.subdirs.values().any(|dir| {
+                    dir.starts_with('/')
+                        || (!dir.is_empty()
+                            && dir.split('/').any(|part| matches!(part, "" | "." | "..")))
+                })
+            {
+                bail!("invalid update plan entry for plugin `{}`", plugin.name);
+            }
+            let selected = plan.names.is_empty() || plan.names.contains(&plugin.name);
+            if !selected && previous.is_some_and(|e| e.matches(plugin) && e != entry) {
+                bail!("update plan changes unselected plugin `{}`", plugin.name);
+            }
+            plugins.insert(plugin.name.clone(), entry.clone());
+        }
+        if plugins != plan.target.plugins {
+            bail!("update plan has unexpected or changed inactive plugins");
         }
         let mut expected = BTreeMap::new();
         for skill in &manifest.skills {
@@ -349,17 +410,7 @@ impl Plan {
                 if let Some(previous) = old.skills.get(name).filter(|p| p.source == entry.source) {
                     crate::sync::describe_change(git, previous, entry, &url, true)?
                 } else {
-                    let tree = if entry.subdir.is_empty() {
-                        entry.commit.clone()
-                    } else {
-                        format!("{}:{}", entry.commit, entry.subdir)
-                    };
-                    git.diff(
-                        &repo,
-                        "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
-                        &tree,
-                        true,
-                    )?
+                    git.diff(&repo, EMPTY_TREE, &tree(&entry.commit, &entry.subdir), true)?
                 };
             changes.insert(name.clone(), patch);
         }
@@ -394,24 +445,49 @@ impl Plan {
             if !target.skills.contains_key(name) {
                 let url = manifest::source_url(&entry.source)?;
                 let repo = git.ensure_commit(&url, &entry.commit)?;
-                let tree = if entry.subdir.is_empty() {
-                    entry.commit.clone()
-                } else {
-                    format!("{}:{}", entry.commit, entry.subdir)
-                };
                 changes.insert(
                     format!("removed:{name}"),
-                    git.diff(
-                        &repo,
-                        &tree,
-                        "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
-                        true,
-                    )?,
+                    git.diff(&repo, &tree(&entry.commit, &entry.subdir), EMPTY_TREE, true)?,
                 );
             }
         }
+        for (name, entry) in &target.plugins {
+            let previous = old.plugins.get(name);
+            if previous == Some(entry) {
+                continue;
+            }
+            let url = manifest::source_url(&entry.source)?;
+            let repo = git.ensure_commit(&url, &entry.commit)?;
+            let mut seen = std::collections::BTreeSet::new();
+            let mut patches = Vec::new();
+            for dir in entry.subdirs.values().filter(|d| seen.insert(*d)) {
+                let from = match previous.filter(|p| p.source == entry.source) {
+                    Some(p) => {
+                        git.ensure_commit(&url, &p.commit)?;
+                        // Compare with the same folder when the previous commit had it.
+                        let old_dir = p.subdirs.values().find(|d| *d == dir).unwrap_or(dir);
+                        tree(&p.commit, old_dir)
+                    }
+                    None => EMPTY_TREE.to_owned(),
+                };
+                patches.push(git.diff(&repo, &from, &tree(&entry.commit, dir), true)?);
+            }
+            changes.insert(format!("plugin:{name}"), patches.join("\n"));
+        }
+        for (name, entry) in &old.plugins {
+            if !target.plugins.contains_key(name) {
+                let url = manifest::source_url(&entry.source)?;
+                let repo = git.ensure_commit(&url, &entry.commit)?;
+                let mut seen = std::collections::BTreeSet::new();
+                let mut patches = Vec::new();
+                for dir in entry.subdirs.values().filter(|d| seen.insert(*d)) {
+                    patches.push(git.diff(&repo, &tree(&entry.commit, dir), EMPTY_TREE, true)?);
+                }
+                changes.insert(format!("removed:plugin:{name}"), patches.join("\n"));
+            }
+        }
         let mut plan = Self {
-            version: 3,
+            version: if target.plugins.is_empty() { 3 } else { PLAN },
             context,
             names,
             target,

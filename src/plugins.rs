@@ -521,12 +521,13 @@ pub enum Event {
 
 /// Builds each plugin's lock entry, fetching only what changed, and unpacks new
 /// folders into the store unless this is a dry run. A plugin that fails keeps its
-/// previous entry.
+/// previous entry. A saved plan supplies the commits instead of the remote.
 pub fn resolve(
     paths: &Paths,
     git: &Git,
     plugins: &[Plugin],
     old: &BTreeMap<String, LockedPlugin>,
+    planned: Option<&BTreeMap<String, LockedPlugin>>,
     active: &crate::profile::Active,
     opts: &crate::sync::Options,
 ) -> Result<(BTreeMap<String, LockedPlugin>, Vec<Event>)> {
@@ -566,8 +567,9 @@ pub fn resolve(
             );
         }
         let result = (|| -> Result<LockedPlugin> {
-            let commit = match previous {
-                Some(entry) if !refresh => entry.commit.clone(),
+            let commit = match (planned.and_then(|p| p.get(&plugin.name)), previous) {
+                (Some(entry), _) => entry.commit.clone(),
+                (None, Some(entry)) if !refresh => entry.commit.clone(),
                 _ => git.resolve(&plugin.url, plugin.git_ref.as_deref())?,
             };
             let repo = git.ensure_commit(&plugin.url, &commit)?;

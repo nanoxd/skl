@@ -6407,12 +6407,6 @@ fn plugins_install_through_each_harness_and_follow_the_lock() {
             .contains("Up to date: 0 skills, 1 plugin")
     );
     env.harness_ok(&["sync", "--locked"]);
-    let plan = env.home.join("plan.toml");
-    assert!(
-        env.fails(&["update", "--plan", plan.to_str().unwrap()])
-            .contains("update plans don't cover plugins yet")
-    );
-    assert!(!plan.exists());
     let list = env.harness_ok(&["list"]);
     assert!(list.contains("Plugins:"), "{list}");
     assert!(!list.contains("not installed"), "{list}");
@@ -6604,6 +6598,72 @@ fn plugin_install_failures_and_missing_harnesses_keep_what_worked() {
     fs::remove_file(fake.join("fail")).unwrap();
     env.harness_ok(&["sync"]);
     assert_eq!(env.fake("codex", "installed"), "pstack@skl\n");
+}
+
+trait Text {
+    fn stderr_text(&self) -> String;
+}
+
+impl Text for Output {
+    fn stderr_text(&self) -> String {
+        String::from_utf8_lossy(&self.stderr).into_owned()
+    }
+}
+
+/// Commits a new version of the plugin's agent in both copies.
+fn change_plugin(env: &Env, text: &str) {
+    let remote = env.remote("plugins");
+    for dir in ["pstack", CLAUDE_PSTACK.trim_end_matches("/skills")] {
+        fs::write(remote.join(dir).join("agents/poteto-agent.md"), text).unwrap();
+    }
+    commit(&remote, text);
+}
+
+#[test]
+fn update_plans_review_and_apply_plugin_commits() {
+    let env = Env::new();
+    let url = plugins_repo(&env);
+    env.write_manifest(&format!("[plugins.pstack]\nsource = '{url}'\n"));
+    env.harness_ok(&["sync"]);
+    let before = fs::read_to_string(env.config("skills.lock")).unwrap();
+    change_plugin(&env, "agent v2");
+
+    // Planning reviews the change without installing anything.
+    let plan = env.home.join("plan.toml");
+    let calls = env.fake("codex", "log");
+    let out = env.harness_ok(&["update", "--plan", plan.to_str().unwrap()]);
+    assert!(out.contains("would update pstack@skl in codex"), "{out}");
+    assert_eq!(
+        fs::read_to_string(env.config("skills.lock")).unwrap(),
+        before
+    );
+    assert_eq!(env.fake("codex", "log"), calls);
+    let text = fs::read_to_string(&plan).unwrap();
+    assert!(text.contains("version = 4"), "{text}");
+    assert!(text.contains("\"plugin:pstack\""), "{text}");
+    assert!(text.contains("+agent v2"), "{text}");
+
+    // A new upstream commit doesn't leak into the reviewed plan.
+    change_plugin(&env, "agent v3");
+    let out = env.harness_ok(&["update", "--apply-plan", plan.to_str().unwrap()]);
+    assert!(out.contains("updated pstack@skl in codex"), "{out}");
+    let lock = lock_toml(&env);
+    let commit = lock["plugins"]["pstack"]["commit"].as_str().unwrap();
+    assert!(text.contains(commit));
+    assert_eq!(
+        fs::read_to_string(
+            env.home
+                .join(".fake-codex/cache/pstack/agents/poteto-agent.md")
+        )
+        .unwrap(),
+        "agent v2"
+    );
+
+    // A plan for a different lock is stale.
+    let err = env
+        .harness(&["update", "--apply-plan", plan.to_str().unwrap()])
+        .stderr_text();
+    assert!(err.contains("update plan is stale"), "{err}");
 }
 
 #[test]

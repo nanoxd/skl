@@ -72,8 +72,9 @@ record the marketplace and enabled plugins in their own settings. skl never edit
 
 `sync` installs the locked commit, `update` moves it and shows what changed, and
 `sync --locked` fails rather than changing the lock. A dry run prints what it would
-install, update or uninstall and runs no agent CLI. [Saved update
-plans](updates.md) don't cover plugins yet.
+install, update or uninstall and runs no agent CLI. A [saved update
+plan](updates.md) pins each plugin's commit and includes the full diff of every
+folder it installs.
 
 ## One plugin, several copies
 

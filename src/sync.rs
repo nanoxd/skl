@@ -125,9 +125,6 @@ fn run_inner(
     let embedded = planned.map(|(_, snapshots)| snapshots);
     let planned = planned.map(|(lock, _)| lock);
     let mut manifest = manifest::load(paths)?;
-    if (planning || planned.is_some()) && !manifest.plugins.is_empty() {
-        bail!("update plans don't cover plugins yet: run `skl update` without a plan");
-    }
     let old_lock = Lock::load(&paths.lock())?;
     let mut out = Report::new(opts.dry_run);
 
@@ -703,6 +700,7 @@ fn run_inner(
         git,
         &manifest.plugins,
         &old_lock.plugins,
+        planned.map(|plan| &plan.plugins),
         active,
         opts,
     )?;
@@ -723,6 +721,13 @@ fn run_inner(
     for name in old_lock.plugins.keys() {
         if !manifest.plugins.iter().any(|p| &p.name == name) {
             out.event('-', name, "plugin".into());
+        }
+    }
+    if let Some(plan) = planned {
+        for (name, entry) in &plugin_entries {
+            if !failed_plugins.contains(name) && plan.plugins.get(name) != Some(entry) {
+                bail!("update plan entry for plugin `{name}` does not match the resolved plugin");
+            }
         }
     }
     lock.plugins = plugin_entries;
