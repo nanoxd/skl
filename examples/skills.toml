@@ -44,6 +44,6 @@ skill-creator = { source = "anthropics/skills", subdir = "skills/skill-creator" 
 # skills = "*"
 # exclude = ["teach"]
 
-# A whole Claude Code or Codex plugin, with its agents, commands and hooks.
+# A whole Claude Code, Codex or Cursor plugin, with its agents, commands and hooks.
 # [plugins.pstack]
 # source = "cursor/plugins"

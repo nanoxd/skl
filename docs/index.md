@@ -37,7 +37,7 @@ on each machine; see [storage and safety](storage-and-safety.md).
 | --- | --- |
 | Install skl and set up another machine | [Getting started](getting-started.md) |
 | Find and install skills | [Finding and adding skills](adding-skills.md) |
-| Install a Claude Code or Codex plugin | [Plugins](plugins.md) |
+| Install a Claude Code, Codex, or Cursor plugin | [Plugins](plugins.md) |
 | Edit the manifest or select a whole repository | [Configuration](configuration.md) |
 | Choose agents, profiles, or operating systems | [Agents and machine selection](agents-and-profiles.md) |
 | Share skills with a team | [Project skills](projects.md) |

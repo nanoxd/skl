@@ -198,12 +198,13 @@ pub fn run(paths: &Paths, active: &Active, names: &[String], json_output: bool) 
         }
         observations.push(observation);
     }
+    let state = crate::plugins::State::load(paths)?;
     manifest.plugins.sort_by(|a, b| a.name.cmp(&b.name));
     for plugin in &manifest.plugins {
         if !names.is_empty() && !names.contains(&plugin.name) {
             continue;
         }
-        for mut observation in verify_plugin(paths, active, &git, &lock, plugin)? {
+        for mut observation in verify_plugin(paths, active, &git, &lock, &state, plugin)? {
             if matches!(observation.status, "drift" | "unavailable") {
                 diagnostics.push(Diagnostic {
                     code: if observation.status == "drift" {
@@ -261,13 +262,15 @@ pub fn run(paths: &Paths, active: &Active, names: &[String], json_output: bool) 
     Ok(healthy)
 }
 
-/// Compares a plugin's store folders with the locked commit. Claude Code reads the
-/// store folder in place; Codex keeps its own copy, which skl can't see.
+/// Compares a plugin's store folders, and Cursor's copies of them, with the locked
+/// commit. Claude Code reads the store folder in place; Codex keeps its own copy,
+/// which skl can't see.
 fn verify_plugin(
     paths: &Paths,
     active: &Active,
     git: &Git,
     lock: &Lock,
+    state: &crate::plugins::State,
     plugin: &crate::plugins::Plugin,
 ) -> Result<Vec<Observation>> {
     let observation = |agents: Vec<String>, status, path, message: String| Observation {
@@ -304,37 +307,63 @@ fn verify_plugin(
     }
     let mut out = Vec::new();
     for (dir, agents) in folders {
-        let path = crate::plugins::store_dir(paths, &plugin.url, &entry.commit, dir);
-        let mut item = observation(
-            agents,
-            "verified",
-            Some(std::path::absolute(&path)?),
-            String::new(),
-        );
+        let target = crate::plugins::store_dir(paths, &plugin.url, &entry.commit, dir);
+        let mut copies = Vec::new();
+        if agents.iter().any(|a| a == "cursor")
+            && let Some(record) = state
+                .get("cursor", &plugin.name)
+                .filter(|r| r.target == target)
+        {
+            copies.push(crate::plugins::local_dir(paths).join(&record.id));
+        }
         let temporary = tempfile::tempdir()?;
         let baseline = temporary.path().join("baseline");
-        let result = git
+        let expected = git
             .export_cached(&plugin.url, &entry.commit, dir, &baseline)
             .context("locked Git baseline is unavailable in the existing repository cache")
-            .and_then(|()| {
-                ensure_directory_chain(&paths.store(), &path)?;
-                compare(&tree(&baseline)?, &tree(&path)?)
-            });
-        match result {
-            Ok(changes) if changes.is_empty() => {
-                item.message = "cached content matches the pinned baseline".into();
+            .and_then(|()| tree(&baseline));
+        for (path, agents, in_store) in std::iter::once((target, agents.clone(), true)).chain(
+            copies
+                .into_iter()
+                .map(|c| (c, vec!["cursor".to_owned()], false)),
+        ) {
+            let mut item = observation(
+                agents,
+                "verified",
+                Some(std::path::absolute(&path)?),
+                String::new(),
+            );
+            let result = expected
+                .as_ref()
+                .map_err(|e| anyhow::anyhow!("{e:#}"))
+                .and_then(|expected| {
+                    if in_store {
+                        ensure_directory_chain(&paths.store(), &path)?;
+                    } else {
+                        ensure!(
+                            fs::symlink_metadata(&path)?.is_dir(),
+                            "{} is not a directory",
+                            path.display()
+                        );
+                    }
+                    compare(expected, &tree(&path)?)
+                });
+            match result {
+                Ok(changes) if changes.is_empty() => {
+                    item.message = "cached content matches the pinned baseline".into();
+                }
+                Ok(changes) => {
+                    item.status = "drift";
+                    item.message = "cached content differs from the pinned baseline".into();
+                    item.changes = changes;
+                }
+                Err(error) => {
+                    item.status = "unavailable";
+                    item.message = format!("{error:#}");
+                }
             }
-            Ok(changes) => {
-                item.status = "drift";
-                item.message = "cached content differs from the pinned baseline".into();
-                item.changes = changes;
-            }
-            Err(error) => {
-                item.status = "unavailable";
-                item.message = format!("{error:#}");
-            }
+            out.push(item);
         }
-        out.push(item);
     }
     Ok(out)
 }

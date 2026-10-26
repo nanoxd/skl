@@ -261,7 +261,7 @@ fn plugins(
     lock: &Lock,
     out: &mut Vec<Diagnostic>,
 ) -> Result<()> {
-    use crate::plugins::InstallStatus;
+    use crate::plugins::{Harness, InstallStatus};
     let state = crate::plugins::State::load(paths).context(
         "check plugins/state.toml; restore a valid state file before running doctor again",
     )?;
@@ -305,6 +305,9 @@ fn plugins(
             );
         }
         for agent in &report.agents {
+            let Some(harness) = Harness::named(&agent.agent) else {
+                continue;
+            };
             let (code, message, remedy) = match agent.status {
                 InstallStatus::Unavailable | InstallStatus::Disabled => continue,
                 InstallStatus::NotInstalled => (
@@ -316,6 +319,11 @@ fn plugins(
                     "outdated-plugin",
                     format!("{} has an older commit or folder installed", agent.agent),
                     "Run skl sync to update plugins.",
+                ),
+                InstallStatus::Changed => (
+                    "plugin-changed",
+                    format!("{}'s copy changed since skl made it", agent.agent),
+                    "Move the copy aside and run skl sync to reinstall it, or remove the plugin from the manifest to keep your copy.",
                 ),
                 InstallStatus::Stale => (
                     "stale-plugin",
@@ -349,7 +357,8 @@ fn plugins(
                 );
             }
             // Claude Code and Codex load skl's plugins through its marketplace links.
-            if matches!(agent.status, InstallStatus::Installed)
+            if harness != Harness::Cursor
+                && matches!(agent.status, InstallStatus::Installed)
                 && let (Some(link), Some(target)) = (&agent.install_path, &agent.recorded_target)
             {
                 check_link(out, link, target, Some(target), Some(&plugin.name));

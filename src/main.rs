@@ -1483,12 +1483,17 @@ fn list(paths: &Paths, active: &Active) -> Result<bool> {
                     notes.push(format!("not installed for {}", missing.join(", ")));
                 }
                 for agent in &report.agents {
-                    if agent.status == plugins::InstallStatus::Unavailable {
-                        notes.push(
+                    match agent.status {
+                        plugins::InstallStatus::Changed => {
+                            healthy = false;
+                            notes.push(format!("{} copy changed", agent.agent));
+                        }
+                        plugins::InstallStatus::Unavailable => notes.push(
                             plugins::Harness::named(&agent.agent)
                                 .map(plugins::Harness::absence)
                                 .unwrap_or_default(),
-                        );
+                        ),
+                        _ => {}
                     }
                 }
                 if notes.is_empty() {

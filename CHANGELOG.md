@@ -34,6 +34,11 @@ All notable changes to this project are documented here.
   the pinned commit, each agent's folder, store copy, and install, plugins that
   aren't installed or are out of date, missing marketplace links, installs left
   after an agent is dropped, and store drift. None of them run an agent CLI.
+- Cursor plugins: Cursor has no install command, so skl copies the plugin into
+  `~/.cursor/plugins/local` when `~/.cursor` exists, and replaces or removes the
+  copy only while it matches the digest skl recorded. An edited or foreign folder
+  is a conflict that skl leaves in place. `info`, `list`, `doctor`, and `verify`
+  report edited copies.
 
 ### Changed
 
